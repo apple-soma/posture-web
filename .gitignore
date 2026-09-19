@@ -1,0 +1,13 @@
+# dependencies and generated build output
+node_modules/
+.next/
+out/
+tsconfig.tsbuildinfo
+
+# local environment secrets
+.env*
+!.env.example
+
+# editor and operating-system files
+.DS_Store
+*.log
