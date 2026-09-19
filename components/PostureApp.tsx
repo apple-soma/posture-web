@@ -5,6 +5,7 @@ import { FilesetResolver, PoseLandmarker } from '@mediapipe/tasks-vision';
 import { gradeAbs, lineTiltDeg, midpoint, refs, scoreMetrics, verticalTiltDeg, type Metrics } from '../lib/posture';
 
 type View = 'front' | 'side';
+type CameraFacing = 'user' | 'environment';
 type Shot = { dataUrl: string; landmarks: any[] | null };
 type Candidate = Shot & { score: number };
 const emptyShot: Shot = { dataUrl: '', landmarks: null };
@@ -37,6 +38,7 @@ export default function PostureApp() {
   const [countdown, setCountdown] = useState(0);
   const [guide, setGuide] = useState('カメラを起動して、案内に従ってください。');
   const [view, setView] = useState<View>('front');
+  const [cameraFacing, setCameraFacing] = useState<CameraFacing>('user');
   const [front, setFront] = useState<Shot>(emptyShot);
   const [side, setSide] = useState<Shot>(emptyShot);
   const [metrics, setMetrics] = useState<Metrics | null>(null);
@@ -56,9 +58,9 @@ export default function PostureApp() {
     return () => landmarkerRef.current?.close();
   }, []);
 
-  async function startCamera() {
+  async function startCamera(facing = cameraFacing) {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 }, aspectRatio: { ideal: 4 / 3 } }, audio: false });
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: facing }, width: { ideal: 1920 }, height: { ideal: 1080 }, aspectRatio: { ideal: 4 / 3 } }, audio: false });
       if (!videoRef.current) return;
       videoRef.current.srcObject = stream; await videoRef.current.play(); setCameraOn(true);
       setGuide(view === 'front' ? '正面を向き、頭から足首までをガイド内に入れてください。' : '体の側面を向き、頭から足首までをガイド内に入れてください。');
@@ -69,6 +71,11 @@ export default function PostureApp() {
     stream?.getTracks().forEach(t => t.stop());
     if (videoRef.current) videoRef.current.srcObject = null;
     setCameraOn(false); setCapturing(false); setCountdown(0);
+  }
+  async function switchCamera() {
+    const next: CameraFacing = cameraFacing === 'user' ? 'environment' : 'user';
+    stopCamera(); setCameraFacing(next);
+    await startCamera(next);
   }
   function snapshot(landmarks: any[]): Shot | null {
     const video = videoRef.current, canvas = canvasRef.current;
@@ -115,8 +122,8 @@ export default function PostureApp() {
     <section className="card"><div className="sectionHead"><div><span className="step">STEP 1</span><h2>自動撮影</h2></div><span className={loading ? 'status wait' : 'status ok'}>{loading ? 'モデル読込中' : 'カメラ準備OK'}</span></div>
       <div className="guideGrid"><div><b>正面</b><p>体の正面を向き、腕を自然に下ろします。</p></div><div><b>側面</b><p>体の側面を向き、普段どおりに立ちます。</p></div></div>
       <div className="tabs"><button className={view === 'front' ? 'active' : ''} onClick={() => setView('front')} disabled={capturing}>正面を撮影</button><button className={view === 'side' ? 'active' : ''} onClick={() => setView('side')} disabled={capturing}>側面を撮影</button></div>
-      <div className="cameraBox"><video ref={videoRef} playsInline muted className={cameraOn ? '' : 'hidden'} />{!cameraOn && <div className="cameraPlaceholder"><div className="silhouette">♙</div><p>{view === 'front' ? '正面撮影ガイド' : '側面撮影ガイド'}</p><div className="guideLine" /></div>}{cameraOn && <><div className="frameGuide" /><div className="liveGuide"><b>{capturing ? `あと ${countdown} 秒` : '全身をガイド内へ'}</b><span>{guide}</span></div></>}</div><canvas ref={canvasRef} className="hidden" />
-      <div className="actions">{!cameraOn ? <button className="primary" onClick={startCamera} disabled={loading}>カメラを起動</button> : <><button className="primary" onClick={autoCapture} disabled={capturing}>{capturing ? '自動選定中…' : '3秒自動撮影を開始'}</button><button className="ghost" onClick={stopCamera}>キャンセル</button></>}</div><p className="notice">{guide}</p>
+      <div className="cameraBox"><video ref={videoRef} playsInline muted className={cameraOn ? '' : 'hidden'} style={{ transform: cameraFacing === 'user' ? 'scaleX(-1)' : undefined }} />{!cameraOn && <div className="cameraPlaceholder"><div className="silhouette">♙</div><p>{view === 'front' ? '正面撮影ガイド' : '側面撮影ガイド'}</p><div className="guideLine" /></div>}{cameraOn && <><div className="frameGuide" /><div className="liveGuide"><b>{capturing ? `あと ${countdown} 秒` : '全身をガイド内へ'}</b><span>{guide}</span></div></>}</div><canvas ref={canvasRef} className="hidden" />
+      <div className="actions">{!cameraOn ? <button className="primary" onClick={() => startCamera()} disabled={loading}>インカメラを起動</button> : <><button className="primary" onClick={autoCapture} disabled={capturing}>{capturing ? '自動選定中…' : '3秒自動撮影を開始'}</button><button className="ghost" onClick={switchCamera} disabled={capturing}>{cameraFacing === 'user' ? '背面カメラへ' : 'インカメラへ'}</button><button className="ghost" onClick={stopCamera}>キャンセル</button></>}</div><p className="notice">{guide}</p>
     </section>
     <section className="card"><div className="sectionHead"><div><span className="step">STEP 2</span><h2>撮影の確認</h2></div></div><div className="shots"><ShotCard title="正面" shot={front} /><ShotCard title="側面" shot={side} /></div><button className="primary wide" onClick={evaluate}>姿勢を評価する</button></section>
     <section className="card"><div className="sectionHead"><div><span className="step">STEP 3・4</span><h2>姿勢評価・測定結果</h2></div>{metrics && <div className="scorePill"><span>総合姿勢スコア</span><b>{metrics.score}</b><small>/100</small></div>}</div>{!metrics ? <div className="emptyResult">正面・側面を撮影すると、ここに測定結果が表示されます。</div> : <><div className="resultTable">{rows.map(r => <div className="resultRow" key={r.key}><div><b>{r.label}</b><span className={`grade ${r.grade}`}>{r.grade}</span></div><strong>{r.value.toFixed(1)}°</strong><p>±2° 良好 / 2〜5° 注意 / &gt;5° 改善推奨</p><p className="delta">前回との差：{r.prev == null ? '前回データなし' : `${(r.value - r.prev).toFixed(1)}°`}</p></div>)}</div><div className="insight"><b>改善ポイント</b><p>{rows.filter(r => r.grade !== '良好').length ? `${rows.filter(r => r.grade !== '良好').map(r => r.label).join('・')}を意識して取り組むと分かりやすいです。` : '今回の3指標はすべて良好です。現在の姿勢を保つことを意識しましょう。'}</p></div></>}<div className="evidence"><b>測定について</b><p>C7はMediaPipeが検出しないため、誤差が大きい手動タップによるCVA測定を廃止しました。肩・骨盤・体幹の3指標を、全身が確認できたフレームから評価します。</p></div></section>
