@@ -1,0 +1,17 @@
+/* Keep the entire camera feed visible: cropping can hide the user's feet. */
+.cameraBox video {
+  object-fit: contain;
+  background: #111;
+}
+
+/* A portrait preview uses the available phone viewport much more effectively. */
+@media (max-width: 680px) {
+  .cameraBox {
+    aspect-ratio: 3 / 4;
+    max-height: calc(100svh - 160px);
+  }
+
+  .frameGuide {
+    inset: 5% 18% 14%;
+  }
+}

@@ -76,7 +76,17 @@ export default function PostureApp() {
 
   async function startCamera(facing = cameraFacing) {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: facing }, width: { ideal: 1920 }, height: { ideal: 1080 }, aspectRatio: { ideal: 4 / 3 } }, audio: false });
+      // Full-body shots are taken upright on phones, so request a portrait feed.
+      const isMobileViewport = window.matchMedia('(max-width: 680px)').matches;
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: facing },
+          width: { ideal: isMobileViewport ? 1080 : 1920 },
+          height: { ideal: isMobileViewport ? 1920 : 1080 },
+          aspectRatio: { ideal: isMobileViewport ? 3 / 4 : 4 / 3 },
+        },
+        audio: false,
+      });
       if (!videoRef.current) return;
       videoRef.current.srcObject = stream; await videoRef.current.play(); setCameraOn(true);
       setGuide(view === 'front' ? '正面を向き、頭から足首までをガイド内に入れてください。' : '体の側面を向き、頭から足首までをガイド内に入れてください。');
