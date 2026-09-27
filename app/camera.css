@@ -1,18 +1,209 @@
 /* Keep the entire camera feed visible: cropping can hide the user's feet. */
 .cameraBox video {
+  /* Never crop a posture shot; preserving the whole feed is more important
+     than filling mismatched aspect-ratio space. */
   object-fit: contain;
   background: #111;
+  cursor: pointer;
+  touch-action: manipulation;
 }
+
+/* A generous rectangle is only a positioning aid. MediaPipe decides whether
+   the head, torso, and ankles are actually present before it saves a frame. */
+.frameGuide {
+  inset: 7% 8% 15%;
+  border-style: solid;
+  border-radius: 18px;
+}
+
+/* The person may be several metres away from the screen. Keep the primary
+   instruction large, high-contrast, and limited to two short lines. */
+.cameraBox .liveGuide {
+  right: 5%;
+  left: 5%;
+  max-width: min(92%, 760px);
+  margin-inline: auto;
+  padding: 14px 18px;
+  background: rgb(8 24 18 / 82%);
+  border-radius: 14px;
+  text-align: center;
+}
+
+.cameraBox .liveGuide b {
+  display: block;
+  color: #fff;
+  font-size: clamp(24px, 3.6vw, 42px);
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.cameraBox .liveGuide span {
+  display: block;
+  margin-top: 6px;
+  color: #e8fff4;
+  font-size: clamp(14px, 1.8vw, 20px);
+}
+
+.testMode {
+  margin: 0 0 16px;
+  padding: 14px;
+  border: 1px dashed #1c6b50;
+  border-radius: 14px;
+  background: #f1f8f4;
+}
+
+.testMode p, .testDebug span {
+  display: block;
+  margin: 5px 0;
+  color: #496057;
+  font-size: 12px;
+}
+
+.testButtons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 8px;
+}
+
+.testButtons .ghost {
+  padding: 7px 10px;
+  font-size: 12px;
+}
+
+.testDebug {
+  margin-top: 10px;
+  padding: 10px;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.poseOverlay {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  border-radius: 12px;
+  background: #111;
+}
+
+.poseOverlay img {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: auto;
+  object-fit: initial;
+  border-radius: 0;
+}
+
+.poseOverlaySvg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.poseOverlaySvg .skeletonLine {
+  stroke: #00d7ff;
+  stroke-width: 5;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.poseOverlaySvg .referenceLine {
+  fill: none;
+  stroke: #f7f0b2;
+  stroke-width: 2;
+  stroke-dasharray: 8 7;
+  vector-effect: non-scaling-stroke;
+}
+
+.poseOverlaySvg .referenceLine.shoulder,
+.poseOverlaySvg .referenceLine.pelvis {
+  stroke: #ff9e5d;
+  stroke-dasharray: 4 5;
+}
+
+.poseOverlaySvg .measurementLine {
+  stroke: #ff5e8a;
+  stroke-width: 4;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.poseOverlaySvg .measurementLabel {
+  fill: #fff;
+  paint-order: stroke;
+  stroke: #422130;
+  stroke-width: 4px;
+  stroke-linejoin: round;
+  font-size: 22px;
+  font-weight: 700;
+  text-anchor: middle;
+}
+
+.poseOverlaySvg circle {
+  fill: #ffcf40;
+  stroke: #14241e;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.skeletonToggle {
+  width: 100%;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid #cfdad4;
+  border-radius: 9px;
+  background: #f7f9f8;
+  color: #13201c;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.overlayToggles {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.overlayToggles .skeletonToggle { margin-top: 0; }
+
+.measurementPanel {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+  padding: 9px 10px;
+  border-radius: 9px;
+  background: #f4f8f6;
+  color: #274138;
+  font-size: 12px;
+}
+
+.measurementPanel b { color: #13201c; }
+
+.assessmentGrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin: 16px 0; }
+.assessmentGrid fieldset { border: 1px solid #d6e0da; border-radius: 10px; padding: 10px; }
+.assessmentGrid legend { font-weight: 700; font-size: 13px; }
+.assessmentGrid label { display: block; margin: 5px 0; font-size: 13px; }
+.assessmentGrid input { margin-right: 6px; }
+.themeBox, .exerciseCard, .exercisePlayer { margin: 12px 0; padding: 14px; border-radius: 12px; background: #f4f8f6; }
+.exerciseCard ul { margin: 8px 0; padding-left: 20px; font-size: 13px; }
+.exercisePlayer { position: sticky; bottom: 12px; border: 2px solid #1c6b50; background: #fff; }
+.exercisePlayer strong { display: block; margin: 10px 0; font-size: 26px; }
 
 /* A portrait preview uses the available phone viewport much more effectively. */
 @media (max-width: 680px) {
   .cameraBox {
-    aspect-ratio: 3 / 4;
+    aspect-ratio: 9 / 16;
     max-height: calc(100svh - 160px);
   }
 
   .frameGuide {
-    inset: 5% 18% 14%;
+    inset: 6% 7% 16%;
+    border-radius: 16px;
   }
 
   /* While the feed is live, use the phone like a regular camera app. */
