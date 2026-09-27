@@ -1,4 +1,4 @@
-export type TestPoseState = 'normal' | 'tooClose' | 'tooFar' | 'left' | 'right' | 'feetOutside' | 'headOutside' | 'unstable' | 'lowConfidence' | 'tiltedShoulderFront' | 'tiltedPelvisFront' | 'normalSide' | 'forwardHeadSide' | 'cvaAboveCutoff' | 'cvaBelowCutoff';
+export type TestPoseState = 'normal' | 'smallJitter' | 'tooClose' | 'tooFar' | 'left' | 'right' | 'feetOutside' | 'headOutside' | 'unstable' | 'lowConfidence' | 'tiltedShoulderFront' | 'tiltedPelvisFront' | 'normalSide' | 'forwardHeadSide' | 'cvaAboveCutoff' | 'cvaBelowCutoff';
 
 export type TestScenario = {
   id: string;
@@ -16,7 +16,7 @@ const posePoints: Record<number, [number, number]> = {
 };
 
 export const testStateLabels: Record<TestPoseState, string> = {
-  normal: '正常', tooClose: '近すぎる', tooFar: '遠すぎる', left: '左寄り', right: '右寄り',
+  normal: '正常', smallJitter: '小さな揺れ', tooClose: '近すぎる', tooFar: '遠すぎる', left: '左寄り', right: '右寄り',
   feetOutside: '足が画面外', headOutside: '頭が画面外', unstable: '不安定', lowConfidence: '低信頼',
   tiltedShoulderFront: '肩傾き（正面）', tiltedPelvisFront: '骨盤傾き（正面）', normalSide: '正常（側面）', forwardHeadSide: '頭部前方（側面）',
   cvaAboveCutoff: 'CVA・カットオフを上回る', cvaBelowCutoff: 'CVA・カットオフを下回る',
@@ -30,6 +30,7 @@ export const testScenarios: TestScenario[] = [
   { id: 'SCENARIO_05', label: '左寄り → 中央 → 撮影成功', frames: [...Array(10).fill('left'), ...Array(48).fill('normal')] },
   { id: 'SCENARIO_06', label: '低信頼 → 正常 → 撮影成功', frames: [...Array(10).fill('lowConfidence'), ...Array(48).fill('normal')] },
   { id: 'SCENARIO_07', label: '不安定で準備OKにならない', frames: Array(60).fill('unstable') },
+  { id: 'TEST_SMALL_JITTER', label: '小さな揺れでも撮影成功', frames: Array(60).fill('smallJitter') },
   { id: 'PHASE2_FRONT_SHOULDER', label: '正面・肩ラインの確認', frames: Array(48).fill('tiltedShoulderFront') },
   { id: 'PHASE2_FRONT_PELVIS', label: '正面・骨盤ラインの確認', frames: Array(48).fill('tiltedPelvisFront') },
   { id: 'PHASE2_SIDE_NORMAL', label: '側面・垂直基準線の確認', frames: Array(48).fill('normalSide') },
@@ -50,6 +51,7 @@ export function createTestLandmarks(state: TestPoseState, frame = 0): Landmark[]
   if (state === 'feetOutside') { landmarks[27].y = 1.02; landmarks[28].y = 1.02; }
   if (state === 'headOutside') landmarks[0].y = -.02;
   if (state === 'unstable') move(frame % 2 ? .1 : -.1, frame % 2 ? .04 : -.04);
+  if (state === 'smallJitter') move(Math.sin(frame * 1.7) * .008, Math.cos(frame * 1.7) * .006);
   if (state === 'lowConfidence') [0, 11, 12, 23].forEach(index => { landmarks[index].visibility = .25; landmarks[index].presence = .25; });
   if (state === 'tiltedShoulderFront') { landmarks[11].y = .27; landmarks[12].y = .34; }
   if (state === 'tiltedPelvisFront') { landmarks[23].y = .55; landmarks[24].y = .63; }

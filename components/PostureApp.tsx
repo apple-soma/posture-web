@@ -31,9 +31,12 @@ const WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-r
 // This is the source of truth for the capture decision, not the drawn guide.
 const REQUIRED = [0, 11, 12, 23, 24, 27, 28];
 const TEST_MODE_ENABLED = process.env.NODE_ENV === 'development';
-type TestDebug = { scenario: string; state: string; fullBody: boolean; centered: boolean; stable: boolean; confidence: number };
-type GuidanceState = 'TOO_FAR' | 'TOO_CLOSE' | 'MOVE_LEFT' | 'MOVE_RIGHT' | 'CENTERED' | 'UNSTABLE' | 'READY' | 'COUNTDOWN' | 'CAPTURED' | 'DETECTING';
-const GUIDANCE: Record<GuidanceState, string> = { TOO_FAR: 'もう少し前に進んでください', TOO_CLOSE: 'もう少し後ろに下がってください', MOVE_LEFT: '少し左に移動してください', MOVE_RIGHT: '少し右に移動してください', CENTERED: '画面の中央に立ってください', UNSTABLE: 'その場で動かずに立ってください', READY: '準備できました。このまま動かないでください', COUNTDOWN: '撮影まで', CAPTURED: '撮影しました', DETECTING: '全身が入る位置に立ってください' };
+type TestDebug = { scenario: string; state: string; fullBody: boolean; centered: boolean; stable: boolean; confidence: number; stableFrames: number; bodyCenter?: { x: number; y: number }; smoothedCenter?: { x: number; y: number }; movementX: number; movementY: number; movementMagnitude: number };
+type GuidanceState = 'TOO_FAR' | 'TOO_CLOSE' | 'MOVE_LEFT' | 'MOVE_RIGHT' | 'CENTERED' | 'STABILIZING' | 'UNSTABLE' | 'READY' | 'COUNTDOWN' | 'CAPTURED' | 'DETECTING';
+const GUIDANCE: Record<GuidanceState, string> = { TOO_FAR: 'もう少し前に進んでください', TOO_CLOSE: 'もう少し後ろに下がってください', MOVE_LEFT: '少し左に移動してください', MOVE_RIGHT: '少し右に移動してください', CENTERED: '画面の中央に立ってください', STABILIZING: 'その位置で自然に立ってください', UNSTABLE: 'その位置で自然に立ってください', READY: '準備できました。このまま動かないでください', COUNTDOWN: '撮影まで', CAPTURED: '撮影しました', DETECTING: '全身が入る位置に立ってください' };
+const STABILITY_ENTER_THRESHOLD = .012;
+const STABILITY_EXIT_THRESHOLD = .032;
+const STABILITY_EMA_ALPHA = .35;
 
 function createTestShot(view: View): Shot {
   const landmarks = Array.from({ length: 33 }, () => ({ x: .5, y: .5, visibility: 1 }));
@@ -80,7 +83,7 @@ export default function PostureApp() {
   const landmarkerRef = useRef<PoseLandmarker | null>(null);
   const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
   const stableFramesRef = useRef(0);
-  const lastPoseRef = useRef<{ x: number; y: number } | null>(null);
+  const stabilityRef = useRef<{ smoothed: { x: number; y: number } | null; previous: { x: number; y: number } | null; largeFrames: number }>({ smoothed: null, previous: null, largeFrames: 0 });
   const testRunRef = useRef<{ scenario: TestScenario; index: number } | null>(null);
   const testModeRef = useRef(false);
   const captureTimerRef = useRef<number | null>(null);
@@ -157,11 +160,27 @@ export default function PostureApp() {
     activateVoiceGuidance();
   }
 
-  function poseCenter(landmarks: any[] | null) {
-    const points = REQUIRED.map(index => landmarks?.[index]).filter(Boolean);
-    if (points.length !== REQUIRED.length) return null;
-    const xs = points.map(point => point.x), ys = points.map(point => point.y);
-    return { x: (Math.min(...xs) + Math.max(...xs)) / 2, y: (Math.min(...ys) + Math.max(...ys)) / 2 };
+  function bodyCenter(landmarks: any[] | null) {
+    const leftShoulder = landmarks?.[11], rightShoulder = landmarks?.[12], leftHip = landmarks?.[23], rightHip = landmarks?.[24];
+    if (!leftShoulder || !rightShoulder || !leftHip || !rightHip) return null;
+    const shoulderCenter = { x: (leftShoulder.x + rightShoulder.x) / 2, y: (leftShoulder.y + rightShoulder.y) / 2 };
+    const hipCenter = { x: (leftHip.x + rightHip.x) / 2, y: (leftHip.y + rightHip.y) / 2 };
+    return { x: (shoulderCenter.x + hipCenter.x) / 2, y: (shoulderCenter.y + hipCenter.y) / 2 };
+  }
+  function updateStability(landmarks: any[] | null, valid: boolean) {
+    const center = bodyCenter(landmarks);
+    const data = stabilityRef.current;
+    if (!center || !valid) { data.smoothed = null; data.previous = null; data.largeFrames = 0; stableFramesRef.current = 0; return { center, smoothed: null, dx: 0, dy: 0, magnitude: 0, unstable: false }; }
+    const smoothed = data.smoothed ? { x: data.smoothed.x + (center.x - data.smoothed.x) * STABILITY_EMA_ALPHA, y: data.smoothed.y + (center.y - data.smoothed.y) * STABILITY_EMA_ALPHA } : center;
+    const dx = data.previous ? smoothed.x - data.previous.x : 0, dy = data.previous ? smoothed.y - data.previous.y : 0;
+    const magnitude = Math.hypot(dx, dy);
+    const large = magnitude > STABILITY_EXIT_THRESHOLD;
+    data.largeFrames = large ? data.largeFrames + 1 : 0;
+    if (large && data.largeFrames >= 2) stableFramesRef.current = Math.max(0, stableFramesRef.current - 3);
+    else if (magnitude <= STABILITY_ENTER_THRESHOLD) stableFramesRef.current += 1;
+    // Medium or single-frame large movement neither resets nor advances stability.
+    data.smoothed = smoothed; data.previous = smoothed;
+    return { center, smoothed, dx, dy, magnitude, unstable: data.largeFrames >= 2 };
   }
 
   function nextTestLandmarks() {
@@ -180,7 +199,7 @@ export default function PostureApp() {
     testRunRef.current = { scenario, index: 0 };
     testModeRef.current = true;
     stableFramesRef.current = 0;
-    lastPoseRef.current = null;
+    stabilityRef.current = { smoothed: null, previous: null, largeFrames: 0 };
     setTestScenario(scenario);
     setTestDebug(null);
     setTestModeActive(true);
@@ -225,22 +244,19 @@ export default function PostureApp() {
       if (!landmarks) return;
 
       const check = assess(landmarks);
-      const currentPose = poseCenter(landmarks);
-      const moved = !!(currentPose && lastPoseRef.current && (Math.abs(currentPose.x - lastPoseRef.current.x) > .035 || Math.abs(currentPose.y - lastPoseRef.current.y) > .035));
-      stableFramesRef.current = check.score > 0 && !moved ? stableFramesRef.current + 1 : 0;
-      lastPoseRef.current = currentPose;
+      const motion = updateStability(landmarks, check.score > 0);
       const ready = stableFramesRef.current >= (testModeActive ? 4 : 7);
       if (!ready) autoCaptureStartedRef.current = false;
       setCaptureReady(ready);
-      setGuide(ready ? '準備OK。撮影ボタンをタップするか、「OK」と話してください。' : check.message);
-      setGuidanceState(guidanceFrom(check.message, ready, moved));
+      setGuide(ready ? '準備できました。このまま動かずに立ってください。' : check.message);
+      setGuidanceState(ready ? 'READY' : check.score > 0 ? (motion.unstable ? 'UNSTABLE' : 'STABILIZING') : guidanceFrom(check.message, false, false));
       if (ready && !autoCaptureStartedRef.current) {
         autoCaptureStartedRef.current = true;
         window.setTimeout(() => autoCapture(true), 0);
       }
       if (testModeActive && testFrame) {
         const visibility = Math.min(...REQUIRED.map(index => landmarks[index]?.visibility ?? 0));
-        setTestDebug({ scenario: testScenario?.id ?? '', state: testStateLabels[testFrame.state], fullBody: check.score > 0, centered: !check.message.includes('中央'), stable: !moved && stableFramesRef.current > 0, confidence: visibility });
+        setTestDebug({ scenario: testScenario?.id ?? '', state: testStateLabels[testFrame.state], fullBody: check.score > 0, centered: !check.message.includes('中央'), stable: !motion.unstable && stableFramesRef.current > 0, confidence: visibility, stableFrames: stableFramesRef.current, bodyCenter: motion.center ?? undefined, smoothedCenter: motion.smoothed ?? undefined, movementX: motion.dx, movementY: motion.dy, movementMagnitude: motion.magnitude });
       }
     }, testModeActive ? 50 : 250);
     return () => window.clearInterval(timer);
@@ -283,6 +299,7 @@ export default function PostureApp() {
       setGuidanceState('DETECTING');
       setCaptureReady(false);
       stableFramesRef.current = 0;
+      stabilityRef.current = { smoothed: null, previous: null, largeFrames: 0 };
       setGuide(view === 'front' ? '正面を向き、頭から足首までをガイド内に入れてください。' : '体の側面を向き、頭から足首までをガイド内に入れてください。');
     } catch { setGuide('カメラを開始できません。カメラの利用を許可してください。'); }
   }
@@ -388,19 +405,28 @@ export default function PostureApp() {
     setCapturing(true); setCountdown(isTestRun ? 1 : 5); setGuidanceState('COUNTDOWN'); setGuide(`${isTestRun ? 'テスト: 1秒後' : '5秒後'}に撮影します。姿勢を保ってください。`); speak(isTestRun ? 'テスト撮影を開始します。' : '5秒後に撮影します。');
     const candidates: Candidate[] = [], started = Date.now();
     let lastSpokenCountdown = 0;
+    let countdownSmoothed: { x: number; y: number } | null = null;
+    let countdownPrevious: { x: number; y: number } | null = null;
+    let countdownLargeFrames = 0, invalidFrames = 0;
     const timer = window.setInterval(() => {
       const testFrame = isTestRun ? nextTestLandmarks() : null;
       const video = videoRef.current, detector = landmarkerRef.current;
       if (!testFrame && (!video || !detector || !video.videoWidth || !video.videoHeight)) return;
       const landmarks = testFrame?.landmarks ?? detector?.detect(video!).landmarks?.[0] ?? null;
       const check = assess(landmarks);
+      const center = bodyCenter(landmarks);
+      const smooth = center && countdownSmoothed ? { x: countdownSmoothed.x + (center.x - countdownSmoothed.x) * STABILITY_EMA_ALPHA, y: countdownSmoothed.y + (center.y - countdownSmoothed.y) * STABILITY_EMA_ALPHA } : center;
+      const movement = smooth && countdownPrevious ? Math.hypot(smooth.x - countdownPrevious.x, smooth.y - countdownPrevious.y) : 0;
+      countdownLargeFrames = movement > STABILITY_EXIT_THRESHOLD ? countdownLargeFrames + 1 : 0;
+      invalidFrames = !landmarks || check.score === 0 ? invalidFrames + 1 : 0;
+      countdownSmoothed = smooth; countdownPrevious = smooth;
       const seconds = Math.max(0, Math.ceil((duration - (Date.now() - started)) / 1000));
       setCountdown(seconds); setGuide(check.message);
       if (seconds > 0 && seconds !== lastSpokenCountdown) { speak(String(seconds), true); lastSpokenCountdown = seconds; }
-      if (!landmarks || check.score === 0) {
+      if (invalidFrames >= 3 || countdownLargeFrames >= 2) {
         window.clearInterval(timer); captureTimerRef.current = null; stableFramesRef.current = 0; setCaptureReady(false); setCapturing(false); setCountdown(0); setGuide('姿勢が崩れたため、カウントダウンをリセットしました。'); speak('姿勢が崩れたため、撮影をやり直します。'); return;
       }
-      const shot = isTestRun ? { ...createTestShot(view), landmarks, manualC7: testFrame ? getTestManualC7(testFrame.state) : undefined } : snapshot(landmarks);
+      const shot = isTestRun && landmarks ? { ...createTestShot(view), landmarks, manualC7: testFrame ? getTestManualC7(testFrame.state) : undefined } : landmarks ? snapshot(landmarks) : null;
       if (shot) candidates.push({ ...shot, score: check.score });
       if (Date.now() - started >= duration) {
         window.clearInterval(timer); captureTimerRef.current = null; const best = candidates.sort((a, b) => b.score - a.score)[0];
@@ -422,7 +448,7 @@ export default function PostureApp() {
     <header className="hero"><div><span className="eyebrow">POSTURE CHECK</span><h1>姿勢から、改善を数字で確認する。</h1><p>カメラ映像を端末内で解析します。写真はサーバーへ送信しません。</p></div><div className="heroScore"><span>測定項目</span><strong>3</strong><small>肩 / 骨盤 / 体幹</small></div></header>
     <section className="card"><div className="sectionHead"><div><span className="step">STEP 1</span><h2>自動・音声撮影</h2></div><span className={loading ? 'status wait' : 'status ok'}>{loading ? 'モデル読込中' : 'カメラ準備OK'}</span></div>
       <div className="guideGrid"><div><b>正面</b><p>体の正面を向き、腕を自然に下ろします。</p></div><div><b>側面</b><p>体の側面を向き、普段どおりに立ちます。</p></div></div>
-      {TEST_MODE_ENABLED && <aside className="testMode" aria-label="開発用テストモード"><b>TEST MODE（開発用）</b><p>実カメラを使わず、MediaPipeと共通の判定ロジックへランドマークを入力します。</p><div className="testButtons">{testScenarios.map(scenario => <button key={scenario.id} className="ghost" onClick={() => startTestScenario(scenario)}>{scenario.id}</button>)}</div><div className="testButtons">{(Object.keys(testStateLabels) as TestPoseState[]).map(state => <button key={state} className="ghost" onClick={() => startTestState(state)}>{testStateLabels[state]}</button>)}</div>{testDebug && <div className="testDebug"><b>{testDebug.scenario}</b><span>状態: {testDebug.state}</span><span>全身: {testDebug.fullBody ? 'OK' : 'NG'} / 中央: {testDebug.centered ? 'OK' : 'NG'} / 安定: {testDebug.stable ? 'OK' : 'NG'}</span><span>Visibility: {testDebug.confidence.toFixed(2)} / カウント: {countdown}</span><span>Speech: {speechSupported ? '対応' : '未確認・未対応'} / 有効: {voiceGuidance ? 'ON' : 'OFF'} / 初期化: {speechInitialized ? '済' : '未'}</span><span>最終発話: {speechRef.current.at ? new Date(speechRef.current.at).toLocaleTimeString() : 'なし'} / 状態: {guidanceState}</span>{speechError && <span>{speechError}</span>}</div>}</aside>}
+      {TEST_MODE_ENABLED && <aside className="testMode" aria-label="開発用テストモード"><b>TEST MODE（開発用）</b><p>実カメラを使わず、MediaPipeと共通の判定ロジックへランドマークを入力します。</p><div className="testButtons">{testScenarios.map(scenario => <button key={scenario.id} className="ghost" onClick={() => startTestScenario(scenario)}>{scenario.id}</button>)}</div><div className="testButtons">{(Object.keys(testStateLabels) as TestPoseState[]).map(state => <button key={state} className="ghost" onClick={() => startTestState(state)}>{testStateLabels[state]}</button>)}</div>{testDebug && <div className="testDebug"><b>{testDebug.scenario}</b><span>状態: {guidanceState} / テスト: {testDebug.state}</span><span>全身: {testDebug.fullBody ? 'OK' : 'NG'} / 中央: {testDebug.centered ? 'OK' : 'NG'} / 安定: {testDebug.stable ? 'OK' : 'NG'} / 安定フレーム: {testDebug.stableFrames}</span><span>Body: {testDebug.bodyCenter ? `${testDebug.bodyCenter.x.toFixed(3)}, ${testDebug.bodyCenter.y.toFixed(3)}` : '—'} / EMA: {testDebug.smoothedCenter ? `${testDebug.smoothedCenter.x.toFixed(3)}, ${testDebug.smoothedCenter.y.toFixed(3)}` : '—'}</span><span>移動: X {testDebug.movementX.toFixed(4)} / Y {testDebug.movementY.toFixed(4)} / 大きさ {testDebug.movementMagnitude.toFixed(4)} / 進入しきい値 {STABILITY_ENTER_THRESHOLD} / 解除しきい値 {STABILITY_EXIT_THRESHOLD}</span><span>Visibility: {testDebug.confidence.toFixed(2)} / カウント: {countdown}</span><span>Speech: {speechSupported ? '対応' : '未確認・未対応'} / 有効: {voiceGuidance ? 'ON' : 'OFF'} / 初期化: {speechInitialized ? '済' : '未'}</span><span>最終発話: {speechRef.current.at ? new Date(speechRef.current.at).toLocaleTimeString() : 'なし'}</span>{speechError && <span>{speechError}</span>}</div>}</aside>}
       {!cameraOn && <div className="captureSetup"><div><b>カメラ</b><div className="tabs"><button className={cameraFacing === 'user' ? 'active' : ''} onClick={() => setCameraFacing('user')}>インカメラ</button><button className={cameraFacing === 'environment' ? 'active' : ''} onClick={() => setCameraFacing('environment')}>アウトカメラ</button></div></div><div><b>音声ガイド</b><div className="tabs"><button className={voiceGuidance ? 'active' : ''} onClick={activateVoiceGuidance}>ON</button><button className={!voiceGuidance ? 'active' : ''} onClick={() => { voiceGuidanceRef.current = false; setVoiceGuidance(false); }}>OFF</button></div></div></div>}
       <div className={`cameraBox ${cameraOn ? 'captureActive' : ''}`}><video ref={videoRef} playsInline muted className={cameraOn ? '' : 'hidden'} style={{ transform: cameraFacing === 'user' ? 'scaleX(-1)' : undefined }} />{!cameraOn && <div className="cameraPlaceholder"><div className="silhouette">♙</div><p>{view === 'front' ? '正面撮影ガイド' : '側面撮影ガイド'}</p><div className="guideLine" /></div>}{cameraOn && <><button className="captureClose" aria-label="撮影を終了" onClick={stopCamera}>×</button><span className="captureStatus">{capturing ? '撮影します' : captureReady ? '準備完了' : '位置調整中'}</span><div className="frameGuide" />{capturing && <div className="countdownOverlay">{countdown}</div>}<div className="liveGuide"><b>{capturing ? 'そのまま動かずに立ってください' : GUIDANCE[guidanceState]}</b></div></>}</div><canvas ref={canvasRef} className="hidden" />
       {!cameraOn && <div className="actions"><button className="primary" onClick={voiceGuidance ? startCameraWithVoice : startCameraWithoutVoice} disabled={loading}>撮影開始</button></div>} {!cameraOn && <p className="notice" aria-live="polite">{guide}</p>}
