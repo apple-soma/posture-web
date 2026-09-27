@@ -87,6 +87,7 @@ export default function PostureApp() {
   const speechRef = useRef({ message: '', at: 0 });
   const voiceGuidanceRef = useRef(true);
   const speechInitializedRef = useRef(false);
+  const autoCaptureStartedRef = useRef(false);
   const [landmarker, setLandmarker] = useState<PoseLandmarker | null>(null);
   const [loading, setLoading] = useState(true);
   const [cameraOn, setCameraOn] = useState(false);
@@ -175,6 +176,7 @@ export default function PostureApp() {
   function startTestScenario(scenario: TestScenario) {
     activateVoiceGuidance();
     stopCamera();
+    autoCaptureStartedRef.current = false;
     testRunRef.current = { scenario, index: 0 };
     testModeRef.current = true;
     stableFramesRef.current = 0;
@@ -228,13 +230,17 @@ export default function PostureApp() {
       stableFramesRef.current = check.score > 0 && !moved ? stableFramesRef.current + 1 : 0;
       lastPoseRef.current = currentPose;
       const ready = stableFramesRef.current >= (testModeActive ? 4 : 7);
+      if (!ready) autoCaptureStartedRef.current = false;
       setCaptureReady(ready);
       setGuide(ready ? '準備OK。撮影ボタンをタップするか、「OK」と話してください。' : check.message);
       setGuidanceState(guidanceFrom(check.message, ready, moved));
+      if (ready && !autoCaptureStartedRef.current) {
+        autoCaptureStartedRef.current = true;
+        window.setTimeout(() => autoCapture(true), 0);
+      }
       if (testModeActive && testFrame) {
         const visibility = Math.min(...REQUIRED.map(index => landmarks[index]?.visibility ?? 0));
         setTestDebug({ scenario: testScenario?.id ?? '', state: testStateLabels[testFrame.state], fullBody: check.score > 0, centered: !check.message.includes('中央'), stable: !moved && stableFramesRef.current > 0, confidence: visibility });
-        if (ready && stableFramesRef.current === 4) window.setTimeout(() => autoCapture(true), 0);
       }
     }, testModeActive ? 50 : 250);
     return () => window.clearInterval(timer);
@@ -242,6 +248,7 @@ export default function PostureApp() {
 
   async function startCamera(facing = cameraFacing) {
     try {
+      autoCaptureStartedRef.current = false;
       // Full-body shots are taken upright on phones, so request a portrait feed.
       const isMobileViewport = window.matchMedia('(max-width: 680px)').matches;
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -416,9 +423,9 @@ export default function PostureApp() {
     <section className="card"><div className="sectionHead"><div><span className="step">STEP 1</span><h2>自動・音声撮影</h2></div><span className={loading ? 'status wait' : 'status ok'}>{loading ? 'モデル読込中' : 'カメラ準備OK'}</span></div>
       <div className="guideGrid"><div><b>正面</b><p>体の正面を向き、腕を自然に下ろします。</p></div><div><b>側面</b><p>体の側面を向き、普段どおりに立ちます。</p></div></div>
       {TEST_MODE_ENABLED && <aside className="testMode" aria-label="開発用テストモード"><b>TEST MODE（開発用）</b><p>実カメラを使わず、MediaPipeと共通の判定ロジックへランドマークを入力します。</p><div className="testButtons">{testScenarios.map(scenario => <button key={scenario.id} className="ghost" onClick={() => startTestScenario(scenario)}>{scenario.id}</button>)}</div><div className="testButtons">{(Object.keys(testStateLabels) as TestPoseState[]).map(state => <button key={state} className="ghost" onClick={() => startTestState(state)}>{testStateLabels[state]}</button>)}</div>{testDebug && <div className="testDebug"><b>{testDebug.scenario}</b><span>状態: {testDebug.state}</span><span>全身: {testDebug.fullBody ? 'OK' : 'NG'} / 中央: {testDebug.centered ? 'OK' : 'NG'} / 安定: {testDebug.stable ? 'OK' : 'NG'}</span><span>Visibility: {testDebug.confidence.toFixed(2)} / カウント: {countdown}</span><span>Speech: {speechSupported ? '対応' : '未確認・未対応'} / 有効: {voiceGuidance ? 'ON' : 'OFF'} / 初期化: {speechInitialized ? '済' : '未'}</span><span>最終発話: {speechRef.current.at ? new Date(speechRef.current.at).toLocaleTimeString() : 'なし'} / 状態: {guidanceState}</span>{speechError && <span>{speechError}</span>}</div>}</aside>}
-      <div className="tabs"><button className={view === 'front' ? 'active' : ''} onClick={() => setView('front')} disabled={capturing}>正面を撮影</button><button className={view === 'side' ? 'active' : ''} onClick={() => setView('side')} disabled={capturing}>側面を撮影</button></div>
-      <div className="cameraBox"><video ref={videoRef} playsInline muted className={cameraOn ? '' : 'hidden'} style={{ transform: cameraFacing === 'user' ? 'scaleX(-1)' : undefined }} />{!cameraOn && <div className="cameraPlaceholder"><div className="silhouette">♙</div><p>{view === 'front' ? '正面撮影ガイド' : '側面撮影ガイド'}</p><div className="guideLine" /></div>}{cameraOn && <><div className="frameGuide" /><div className="liveGuide"><b>{capturing ? `撮影まで ${countdown}` : GUIDANCE[guidanceState]}</b><span>{guide}</span></div></>}</div><canvas ref={canvasRef} className="hidden" />
-      <div className="actions">{!cameraOn ? <><button className="primary" onClick={startCameraWithVoice} disabled={loading}>音声ONで撮影開始</button><button className="ghost" onClick={startCameraWithoutVoice} disabled={loading}>音声OFFで撮影開始</button></> : <><button className="primary" onClick={() => autoCapture()} disabled={capturing || voiceListening || !captureReady}>{capturing ? '自動選定中…' : '5秒カウントダウン撮影'}</button><button className={voiceListening ? 'primary' : 'ghost'} onClick={voiceListening ? stopVoiceCapture : startVoiceCapture} disabled={capturing || !captureReady}>{voiceListening ? '音声撮影を停止' : '「OK」で撮影'}</button><button className="ghost" onClick={toggleVoiceGuidance}>{`音声案内 ${voiceGuidance ? 'ON' : 'OFF'}`}</button><button className="ghost" onClick={switchCamera} disabled={capturing || voiceListening}>{cameraFacing === 'user' ? '背面カメラへ' : 'インカメラへ'}</button><button className="ghost" onClick={stopCamera}>キャンセル</button></>}</div><p className="notice" aria-live="polite">{guide}</p>
+      {!cameraOn && <div className="captureSetup"><div><b>カメラ</b><div className="tabs"><button className={cameraFacing === 'user' ? 'active' : ''} onClick={() => setCameraFacing('user')}>インカメラ</button><button className={cameraFacing === 'environment' ? 'active' : ''} onClick={() => setCameraFacing('environment')}>アウトカメラ</button></div></div><div><b>音声ガイド</b><div className="tabs"><button className={voiceGuidance ? 'active' : ''} onClick={activateVoiceGuidance}>ON</button><button className={!voiceGuidance ? 'active' : ''} onClick={() => { voiceGuidanceRef.current = false; setVoiceGuidance(false); }}>OFF</button></div></div></div>}
+      <div className={`cameraBox ${cameraOn ? 'captureActive' : ''}`}><video ref={videoRef} playsInline muted className={cameraOn ? '' : 'hidden'} style={{ transform: cameraFacing === 'user' ? 'scaleX(-1)' : undefined }} />{!cameraOn && <div className="cameraPlaceholder"><div className="silhouette">♙</div><p>{view === 'front' ? '正面撮影ガイド' : '側面撮影ガイド'}</p><div className="guideLine" /></div>}{cameraOn && <><button className="captureClose" aria-label="撮影を終了" onClick={stopCamera}>×</button><span className="captureStatus">{capturing ? '撮影します' : captureReady ? '準備完了' : '位置調整中'}</span><div className="frameGuide" />{capturing && <div className="countdownOverlay">{countdown}</div>}<div className="liveGuide"><b>{capturing ? 'そのまま動かずに立ってください' : GUIDANCE[guidanceState]}</b></div></>}</div><canvas ref={canvasRef} className="hidden" />
+      {!cameraOn && <div className="actions"><button className="primary" onClick={voiceGuidance ? startCameraWithVoice : startCameraWithoutVoice} disabled={loading}>撮影開始</button></div>} {!cameraOn && <p className="notice" aria-live="polite">{guide}</p>}
     </section>
     <section className="card"><div className="sectionHead"><div><span className="step">STEP 2</span><h2>撮影の確認</h2></div></div><div className="shots"><ShotCard title="正面" shot={front} /><ShotCard title="側面" shot={side} /></div><button className="primary wide" onClick={evaluate}>姿勢を評価する</button></section>
     <section className="card"><div className="sectionHead"><div><span className="step">STEP 3</span><h2>測定値と研究上の参考情報</h2></div></div>{!evaluationResults.length ? <div className="emptyResult">正面・側面を撮影後、「姿勢を評価する」を押すと項目別の参考情報を表示します。</div> : <div className="resultTable">{evaluationResults.map(result => <div className="resultRow" key={result.measurementId}><div><b>{{ cva: 'CVA', shoulderTilt: '肩の傾き', pelvisTilt: '骨盤の傾き', earOffset: '耳の前後位置', shoulderOffset: '肩の前後位置', hipOffset: '股関節の前後位置', kneeOffset: '膝の前後位置', ankleOffset: '足首の前後位置' }[result.measurementId] ?? result.measurementId}</b></div>{result.value != null && <strong>{`${result.value >= 0 ? '+' : ''}${result.value.toFixed(result.unit === 'normalized' ? 3 : 1)}${result.unit === 'degree' ? '°' : '（正規化座標）'}`}</strong>}<p>{result.explanation}</p>{result.reference && <details><summary>出典を見る</summary><p>{result.reference.sourceTitle}</p><p>{result.reference.sourceAuthors}（{result.reference.sourceYear}）</p><p>対象: {result.reference.population}</p><p>方法: {result.reference.measurementMethod}</p><a href={result.reference.sourceUrl} target="_blank" rel="noreferrer">PubMedで確認</a></details>}</div>)}</div>}<div className="evidence"><b>ご利用にあたって</b><p>本サービスの姿勢測定・評価は研究情報に基づく参考情報であり、医療上の診断を行うものではありません。</p></div></section>
