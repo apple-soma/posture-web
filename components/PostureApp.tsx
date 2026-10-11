@@ -31,9 +31,27 @@ const WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-r
 // This is the source of truth for the capture decision, not the drawn guide.
 const REQUIRED = [0, 11, 12, 23, 24, 27, 28];
 const TEST_MODE_ENABLED = process.env.NODE_ENV === 'development';
-type TestDebug = { scenario: string; state: string; fullBody: boolean; centered: boolean; stable: boolean; confidence: number; stableFrames: number; bodyCenter?: { x: number; y: number }; smoothedCenter?: { x: number; y: number }; movementX: number; movementY: number; movementMagnitude: number };
-type GuidanceState = 'TOO_FAR' | 'TOO_CLOSE' | 'MOVE_LEFT' | 'MOVE_RIGHT' | 'CENTERED' | 'STABILIZING' | 'UNSTABLE' | 'READY' | 'COUNTDOWN' | 'CAPTURED' | 'DETECTING';
-const GUIDANCE: Record<GuidanceState, string> = { TOO_FAR: 'もう少し前に進んでください', TOO_CLOSE: 'もう少し後ろに下がってください', MOVE_LEFT: '少し左に移動してください', MOVE_RIGHT: '少し右に移動してください', CENTERED: '画面の中央に立ってください', STABILIZING: 'その位置で自然に立ってください', UNSTABLE: 'その位置で自然に立ってください', READY: '準備できました。このまま動かないでください', COUNTDOWN: '撮影まで', CAPTURED: '撮影しました', DETECTING: '全身が入る位置に立ってください' };
+type TestDebug = { scenario: string; state: string; issue: CaptureIssue; fullBody: boolean; centered: boolean; stable: boolean; confidence: number; stableFrames: number; bodyCenter?: { x: number; y: number }; smoothedCenter?: { x: number; y: number }; movementX: number; movementY: number; movementMagnitude: number };
+type CaptureIssue = 'notDetected' | 'lowConfidence' | 'headOutside' | 'feetOutside' | 'bodyOutside' | 'tooClose' | 'tooFar' | 'turnBody' | 'moveLeft' | 'moveRight' | 'fullBody';
+type GuidanceState = 'TOO_FAR' | 'TOO_CLOSE' | 'HEAD_OUT' | 'FEET_OUT' | 'BODY_OUT' | 'LOW_CONFIDENCE' | 'TURN_BODY' | 'MOVE_LEFT' | 'MOVE_RIGHT' | 'CENTERED' | 'STABILIZING' | 'UNSTABLE' | 'READY' | 'COUNTDOWN' | 'CAPTURED' | 'DETECTING';
+const GUIDANCE: Record<GuidanceState, string> = {
+  TOO_FAR: 'もう少し前に進んでください',
+  TOO_CLOSE: '頭と足首が画面から切れています',
+  HEAD_OUT: '頭が画面から切れています',
+  FEET_OUT: '足首が画面から切れています',
+  BODY_OUT: '体が左右で画面から切れています',
+  LOW_CONFIDENCE: '体の一部を認識できません',
+  TURN_BODY: '正面または側面を向いてください',
+  MOVE_LEFT: '少し左に移動してください',
+  MOVE_RIGHT: '少し右に移動してください',
+  CENTERED: '画面の中央に立ってください',
+  STABILIZING: 'その位置で自然に立ってください',
+  UNSTABLE: 'その位置で自然に立ってください',
+  READY: '準備できました。このまま動かないでください',
+  COUNTDOWN: '撮影まで',
+  CAPTURED: '撮影しました',
+  DETECTING: '全身が入る位置に立ってください',
+};
 const STABILITY_ENTER_THRESHOLD = .012;
 const STABILITY_EXIT_THRESHOLD = .032;
 const STABILITY_EMA_ALPHA = .35;
@@ -49,32 +67,33 @@ function createTestShot(view: View): Shot {
   return { landmarks, imageWidth: 540, imageHeight: 960, dataUrl: `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(image)}` };
 }
 
-function assess(landmarks: any[] | null) {
-  if (!landmarks) return { score: 0, message: '人物を検出しています。枠内に入ってください。' };
+function assess(landmarks: any[] | null): { score: number; message: string; issue: CaptureIssue; centered: boolean } {
+  if (!landmarks) return { score: 0, issue: 'notDetected', centered: false, message: '人物を検出できません。頭から足首までが明るく映る位置に立ってください。' };
   const p = REQUIRED.map(i => landmarks[i]).filter(Boolean);
-  if (p.length !== REQUIRED.length || p.some(x => (x.visibility ?? 1) < .55)) return { score: 0, message: '頭から足首までが見える位置に移動してください。' };
+  if (p.length !== REQUIRED.length || p.some(x => (x.visibility ?? 1) < .55)) return { score: 0, issue: 'lowConfidence', centered: false, message: '頭・肩・腰・足首の一部を認識できません。全身を明るく映し、腕を体から少し離してください。' };
   const xs = p.map(x => x.x), ys = p.map(x => x.y);
   const top = Math.min(...ys), bottom = Math.max(...ys), left = Math.min(...xs), right = Math.max(...xs);
   const height = bottom - top, width = right - left;
-  if (top < .04 || bottom > .96 || left < .04 || right > .96 || height > .84) return { score: 0, message: '体が画面から切れています。少し離れてください。' };
-  if (height < .48) return { score: 0, message: '遠すぎます。ガイドの人物枠に近づいてください。' };
-  if (width < .12) return { score: 0, message: '体をまっすぐ向け、画面の中央に合わせてください。' };
-  if ((left + right) / 2 < .36) return { score: 0, message: '少し右に移動してください。' };
-  if ((left + right) / 2 > .64) return { score: 0, message: '少し左に移動してください。' };
+  if (top < .04 && bottom > .96) return { score: 0, issue: 'tooClose', centered: false, message: '頭と足首が画面から切れています。全身が入るまで、もう少し後ろに下がってください。' };
+  if (top < .04) return { score: 0, issue: 'headOutside', centered: false, message: '頭が画面から切れています。頭の上に少し余白ができるまで、後ろに下がってください。' };
+  if (bottom > .96) return { score: 0, issue: 'feetOutside', centered: false, message: '足首が画面から切れています。足元に少し余白ができるまで、後ろに下がってください。' };
+  if (left < .04 || right > .96) return { score: 0, issue: 'bodyOutside', centered: false, message: '体が左右で画面から切れています。中央に戻り、腕を体の横に下ろしてください。' };
+  if (height > .84) return { score: 0, issue: 'tooClose', centered: false, message: '体が大きく映っています。頭と足首に余白ができるまで、もう少し後ろに下がってください。' };
+  if (height < .48) return { score: 0, issue: 'tooFar', centered: false, message: '体が小さく映っています。全身を入れたまま、もう少し前に進んでください。' };
+  if (width < .12) return { score: 0, issue: 'turnBody', centered: false, message: '体の向きを確認できません。正面または側面を向き、肩と腰が見える位置に立ってください。' };
+  if ((left + right) / 2 < .36) return { score: 0, issue: 'moveRight', centered: false, message: '体が画面の左に寄っています。少し右に移動してください。' };
+  if ((left + right) / 2 > .64) return { score: 0, issue: 'moveLeft', centered: false, message: '体が画面の右に寄っています。少し左に移動してください。' };
   const centered = 1 - Math.min(1, Math.abs((left + right) / 2 - .5) * 3);
-  return { score: Math.round((centered * .4 + (1 - Math.min(1, Math.abs(height - .66) / .22)) * .6) * 100), message: '全身を確認できました。このまま自然に静止してください。' };
+  return { score: Math.round((centered * .4 + (1 - Math.min(1, Math.abs(height - .66) / .22)) * .6) * 100), issue: 'fullBody', centered: true, message: '全身を確認しました。このまま自然に静止してください。' };
 }
 
-function guidanceFrom(message: string, ready: boolean, moved: boolean): GuidanceState {
+function guidanceFrom(issue: CaptureIssue, ready: boolean, moved: boolean): GuidanceState {
   if (ready) return 'READY';
   if (moved) return 'UNSTABLE';
-  if (message.includes('遠すぎ')) return 'TOO_FAR';
-  if (message.includes('切れ') || message.includes('頭から足首') || message.includes('人物を検出')) return 'TOO_CLOSE';
-  if (message.includes('右に移動')) return 'MOVE_RIGHT';
-  if (message.includes('左に移動')) return 'MOVE_LEFT';
-  if (message.includes('全身を確認')) return 'CENTERED';
-  if (message.includes('中央')) return 'CENTERED';
-  return 'DETECTING';
+  const states: Record<CaptureIssue, GuidanceState> = {
+    notDetected: 'DETECTING', lowConfidence: 'LOW_CONFIDENCE', headOutside: 'HEAD_OUT', feetOutside: 'FEET_OUT', bodyOutside: 'BODY_OUT', tooClose: 'TOO_CLOSE', tooFar: 'TOO_FAR', turnBody: 'TURN_BODY', moveLeft: 'MOVE_LEFT', moveRight: 'MOVE_RIGHT', fullBody: 'CENTERED',
+  };
+  return states[issue];
 }
 
 export default function PostureApp() {
@@ -249,14 +268,14 @@ export default function PostureApp() {
       if (!ready) autoCaptureStartedRef.current = false;
       setCaptureReady(ready);
       setGuide(ready ? '準備できました。このまま動かずに立ってください。' : check.message);
-      setGuidanceState(ready ? 'READY' : check.score > 0 ? (motion.unstable ? 'UNSTABLE' : 'STABILIZING') : guidanceFrom(check.message, false, false));
+      setGuidanceState(ready ? 'READY' : check.score > 0 ? (motion.unstable ? 'UNSTABLE' : 'STABILIZING') : guidanceFrom(check.issue, false, false));
       if (ready && !autoCaptureStartedRef.current) {
         autoCaptureStartedRef.current = true;
         window.setTimeout(() => autoCapture(true), 0);
       }
       if (testModeActive && testFrame) {
         const visibility = Math.min(...REQUIRED.map(index => landmarks[index]?.visibility ?? 0));
-        setTestDebug({ scenario: testScenario?.id ?? '', state: testStateLabels[testFrame.state], fullBody: check.score > 0, centered: !check.message.includes('中央'), stable: !motion.unstable && stableFramesRef.current > 0, confidence: visibility, stableFrames: stableFramesRef.current, bodyCenter: motion.center ?? undefined, smoothedCenter: motion.smoothed ?? undefined, movementX: motion.dx, movementY: motion.dy, movementMagnitude: motion.magnitude });
+        setTestDebug({ scenario: testScenario?.id ?? '', state: testStateLabels[testFrame.state], issue: check.issue, fullBody: check.score > 0, centered: check.centered, stable: !motion.unstable && stableFramesRef.current > 0, confidence: visibility, stableFrames: stableFramesRef.current, bodyCenter: motion.center ?? undefined, smoothedCenter: motion.smoothed ?? undefined, movementX: motion.dx, movementY: motion.dy, movementMagnitude: motion.magnitude });
       }
     }, testModeActive ? 50 : 250);
     return () => window.clearInterval(timer);
@@ -448,9 +467,9 @@ export default function PostureApp() {
     <header className="hero"><div><span className="eyebrow">POSTURE CHECK</span><h1>姿勢から、改善を数字で確認する。</h1><p>カメラ映像を端末内で解析します。写真はサーバーへ送信しません。</p></div><div className="heroScore"><span>測定項目</span><strong>3</strong><small>肩 / 骨盤 / 体幹</small></div></header>
     <section className="card"><div className="sectionHead"><div><span className="step">STEP 1</span><h2>自動・音声撮影</h2></div><span className={loading ? 'status wait' : 'status ok'}>{loading ? 'モデル読込中' : 'カメラ準備OK'}</span></div>
       <div className="guideGrid"><div><b>正面</b><p>体の正面を向き、腕を自然に下ろします。</p></div><div><b>側面</b><p>体の側面を向き、普段どおりに立ちます。</p></div></div>
-      {TEST_MODE_ENABLED && <aside className="testMode" aria-label="開発用テストモード"><b>TEST MODE（開発用）</b><p>実カメラを使わず、MediaPipeと共通の判定ロジックへランドマークを入力します。</p><div className="testButtons">{testScenarios.map(scenario => <button key={scenario.id} className="ghost" onClick={() => startTestScenario(scenario)}>{scenario.id}</button>)}</div><div className="testButtons">{(Object.keys(testStateLabels) as TestPoseState[]).map(state => <button key={state} className="ghost" onClick={() => startTestState(state)}>{testStateLabels[state]}</button>)}</div>{testDebug && <div className="testDebug"><b>{testDebug.scenario}</b><span>状態: {guidanceState} / テスト: {testDebug.state}</span><span>全身: {testDebug.fullBody ? 'OK' : 'NG'} / 中央: {testDebug.centered ? 'OK' : 'NG'} / 安定: {testDebug.stable ? 'OK' : 'NG'} / 安定フレーム: {testDebug.stableFrames}</span><span>Body: {testDebug.bodyCenter ? `${testDebug.bodyCenter.x.toFixed(3)}, ${testDebug.bodyCenter.y.toFixed(3)}` : '—'} / EMA: {testDebug.smoothedCenter ? `${testDebug.smoothedCenter.x.toFixed(3)}, ${testDebug.smoothedCenter.y.toFixed(3)}` : '—'}</span><span>移動: X {testDebug.movementX.toFixed(4)} / Y {testDebug.movementY.toFixed(4)} / 大きさ {testDebug.movementMagnitude.toFixed(4)} / 進入しきい値 {STABILITY_ENTER_THRESHOLD} / 解除しきい値 {STABILITY_EXIT_THRESHOLD}</span><span>Visibility: {testDebug.confidence.toFixed(2)} / カウント: {countdown}</span><span>Speech: {speechSupported ? '対応' : '未確認・未対応'} / 有効: {voiceGuidance ? 'ON' : 'OFF'} / 初期化: {speechInitialized ? '済' : '未'}</span><span>最終発話: {speechRef.current.at ? new Date(speechRef.current.at).toLocaleTimeString() : 'なし'}</span>{speechError && <span>{speechError}</span>}</div>}</aside>}
+      {TEST_MODE_ENABLED && <aside className="testMode" aria-label="開発用テストモード"><b>TEST MODE（開発用）</b><p>実カメラを使わず、MediaPipeと共通の判定ロジックへランドマークを入力します。</p><div className="testButtons">{testScenarios.map(scenario => <button key={scenario.id} className="ghost" onClick={() => startTestScenario(scenario)}>{scenario.id}</button>)}</div><div className="testButtons">{(Object.keys(testStateLabels) as TestPoseState[]).map(state => <button key={state} className="ghost" onClick={() => startTestState(state)}>{testStateLabels[state]}</button>)}</div>{testDebug && <div className="testDebug"><b>{testDebug.scenario}</b><span>状態: {guidanceState} / テスト: {testDebug.state} / 判定理由: {testDebug.issue}</span><span>全身: {testDebug.fullBody ? 'OK' : 'NG'} / 中央: {testDebug.centered ? 'OK' : 'NG'} / 安定: {testDebug.stable ? 'OK' : 'NG'} / 安定フレーム: {testDebug.stableFrames}</span><span>Body: {testDebug.bodyCenter ? `${testDebug.bodyCenter.x.toFixed(3)}, ${testDebug.bodyCenter.y.toFixed(3)}` : '—'} / EMA: {testDebug.smoothedCenter ? `${testDebug.smoothedCenter.x.toFixed(3)}, ${testDebug.smoothedCenter.y.toFixed(3)}` : '—'}</span><span>移動: X {testDebug.movementX.toFixed(4)} / Y {testDebug.movementY.toFixed(4)} / 大きさ {testDebug.movementMagnitude.toFixed(4)} / 進入しきい値 {STABILITY_ENTER_THRESHOLD} / 解除しきい値 {STABILITY_EXIT_THRESHOLD}</span><span>Visibility: {testDebug.confidence.toFixed(2)} / カウント: {countdown}</span><span>Speech: {speechSupported ? '対応' : '未確認・未対応'} / 有効: {voiceGuidance ? 'ON' : 'OFF'} / 初期化: {speechInitialized ? '済' : '未'}</span><span>最終発話: {speechRef.current.at ? new Date(speechRef.current.at).toLocaleTimeString() : 'なし'}</span>{speechError && <span>{speechError}</span>}</div>}</aside>}
       {!cameraOn && <div className="captureSetup"><div><b>カメラ</b><div className="tabs"><button className={cameraFacing === 'user' ? 'active' : ''} onClick={() => setCameraFacing('user')}>インカメラ</button><button className={cameraFacing === 'environment' ? 'active' : ''} onClick={() => setCameraFacing('environment')}>アウトカメラ</button></div></div><div><b>音声ガイド</b><div className="tabs"><button className={voiceGuidance ? 'active' : ''} onClick={activateVoiceGuidance}>ON</button><button className={!voiceGuidance ? 'active' : ''} onClick={() => { voiceGuidanceRef.current = false; setVoiceGuidance(false); }}>OFF</button></div></div></div>}
-      <div className={`cameraBox ${cameraOn ? 'captureActive' : ''}`}><video ref={videoRef} playsInline muted className={cameraOn ? '' : 'hidden'} style={{ transform: cameraFacing === 'user' ? 'scaleX(-1)' : undefined }} />{!cameraOn && <div className="cameraPlaceholder"><div className="silhouette">♙</div><p>{view === 'front' ? '正面撮影ガイド' : '側面撮影ガイド'}</p><div className="guideLine" /></div>}{cameraOn && <><button className="captureClose" aria-label="撮影を終了" onClick={stopCamera}>×</button><span className="captureStatus">{capturing ? '撮影します' : captureReady ? '準備完了' : '位置調整中'}</span><div className="frameGuide" />{capturing && <div className="countdownOverlay">{countdown}</div>}<div className="liveGuide"><b>{capturing ? 'そのまま動かずに立ってください' : GUIDANCE[guidanceState]}</b></div></>}</div><canvas ref={canvasRef} className="hidden" />
+      <div className={`cameraBox ${cameraOn ? 'captureActive' : ''}`}><video ref={videoRef} playsInline muted className={cameraOn ? '' : 'hidden'} style={{ transform: cameraFacing === 'user' ? 'scaleX(-1)' : undefined }} />{!cameraOn && <div className="cameraPlaceholder"><div className="silhouette">♙</div><p>{view === 'front' ? '正面撮影ガイド' : '側面撮影ガイド'}</p><div className="guideLine" /></div>}{cameraOn && <><button className="captureClose" aria-label="撮影を終了" onClick={stopCamera}>×</button><span className="captureStatus">{capturing ? '撮影します' : captureReady ? '準備完了' : '位置調整中'}</span><div className="frameGuide" />{capturing && <div className="countdownOverlay">{countdown}</div>}<div className="liveGuide"><b>{capturing ? 'そのまま動かずに立ってください' : GUIDANCE[guidanceState]}</b><span>{capturing ? '姿勢が崩れると撮影をやり直します。' : guide}</span></div></>}</div><canvas ref={canvasRef} className="hidden" />
       {!cameraOn && <div className="actions"><button className="primary" onClick={voiceGuidance ? startCameraWithVoice : startCameraWithoutVoice} disabled={loading}>撮影開始</button></div>} {!cameraOn && <p className="notice" aria-live="polite">{guide}</p>}
     </section>
     <section className="card"><div className="sectionHead"><div><span className="step">STEP 2</span><h2>撮影の確認</h2></div></div><div className="shots"><ShotCard title="正面" shot={front} /><ShotCard title="側面" shot={side} /></div><button className="primary wide" onClick={evaluate}>姿勢を評価する</button></section>
