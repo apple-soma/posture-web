@@ -6,7 +6,7 @@ import type { EvaluationResult } from '../lib/postureEvaluation';
 import { evaluateMeasurements } from '../lib/postureEvaluation';
 import { createTestLandmarks, getTestManualC7, testScenarios, testStateLabels, type TestPoseState, type TestScenario } from '../lib/postureTestData';
 import { PoseOverlay, createPoseSkeleton } from './posture/PoseOverlay';
-import { createMeasurementOverlay } from '../lib/postureMeasurement';
+import { createMeasurementOverlay, type CaptureSegment, type PostureMeasurement } from '../lib/postureMeasurement';
 import PlanBuilder from './phase4/PlanBuilder';
 
 type View = 'front' | 'side';
@@ -29,7 +29,11 @@ const MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/pose_landmark
 const WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-rc.20250304/wasm';
 // A valid shot must include the head, shoulders, hips, and both ankles.
 // This is the source of truth for the capture decision, not the drawn guide.
-const REQUIRED = [0, 11, 12, 23, 24, 27, 28];
+const REQUIRED: Record<CaptureSegment, number[]> = {
+  full: [0, 11, 12, 23, 24, 27, 28],
+  upper: [0, 11, 12, 23, 24],
+  lower: [23, 24, 25, 26, 27, 28],
+};
 const TEST_MODE_ENABLED = process.env.NODE_ENV === 'development';
 type TestDebug = { scenario: string; state: string; issue: CaptureIssue; fullBody: boolean; centered: boolean; stable: boolean; confidence: number; stableFrames: number; bodyCenter?: { x: number; y: number }; smoothedCenter?: { x: number; y: number }; movementX: number; movementY: number; movementMagnitude: number };
 type CaptureIssue = 'notDetected' | 'lowConfidence' | 'headOutside' | 'feetOutside' | 'bodyOutside' | 'tooClose' | 'tooFar' | 'turnBody' | 'moveLeft' | 'moveRight' | 'fullBody';
@@ -67,24 +71,37 @@ function createTestShot(view: View): Shot {
   return { landmarks, imageWidth: 540, imageHeight: 960, dataUrl: `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(image)}` };
 }
 
-function assess(landmarks: any[] | null): { score: number; message: string; issue: CaptureIssue; centered: boolean } {
+function captureLabel(view: View, segment: CaptureSegment) {
+  return `${view === 'front' ? '正面' : '側面'}・${segment === 'upper' ? '上半身' : '下半身'}`;
+}
+
+function captureInstruction(view: View, segment: CaptureSegment) {
+  const direction = view === 'front' ? '体の正面を向き' : '体の側面を向き';
+  return segment === 'upper'
+    ? `${direction}、頭から骨盤までを映してください。`
+    : `${direction}、骨盤から足先までを映してください。`;
+}
+
+function assess(landmarks: any[] | null, segment: CaptureSegment, captureView: View): { score: number; message: string; issue: CaptureIssue; centered: boolean } {
   if (!landmarks) return { score: 0, issue: 'notDetected', centered: false, message: '人物を検出できません。頭から足首までが明るく映る位置に立ってください。' };
-  const p = REQUIRED.map(i => landmarks[i]).filter(Boolean);
-  if (p.length !== REQUIRED.length || p.some(x => (x.visibility ?? 1) < .55)) return { score: 0, issue: 'lowConfidence', centered: false, message: '頭・肩・腰・足首の一部を認識できません。全身を明るく映し、腕を体から少し離してください。' };
+  const required = REQUIRED[segment];
+  const p = required.map(i => landmarks[i]).filter(Boolean);
+  const missingMessage = segment === 'upper' ? '頭・肩・骨盤の一部を認識できません。頭から骨盤までを明るく映してください。' : '骨盤・膝・足首の一部を認識できません。骨盤から足先までを明るく映してください。';
+  if (p.length !== required.length || p.some(x => (x.visibility ?? 1) < .55)) return { score: 0, issue: 'lowConfidence', centered: false, message: missingMessage };
   const xs = p.map(x => x.x), ys = p.map(x => x.y);
   const top = Math.min(...ys), bottom = Math.max(...ys), left = Math.min(...xs), right = Math.max(...xs);
   const height = bottom - top, width = right - left;
-  if (top < .04 && bottom > .96) return { score: 0, issue: 'tooClose', centered: false, message: '頭と足首が画面から切れています。全身が入るまで、もう少し後ろに下がってください。' };
-  if (top < .04) return { score: 0, issue: 'headOutside', centered: false, message: '頭が画面から切れています。頭の上に少し余白ができるまで、後ろに下がってください。' };
-  if (bottom > .96) return { score: 0, issue: 'feetOutside', centered: false, message: '足首が画面から切れています。足元に少し余白ができるまで、後ろに下がってください。' };
+  if (top < .04 && bottom > .96) return { score: 0, issue: 'tooClose', centered: false, message: `${captureLabel(captureView, segment)}が画面から切れています。対象部位が収まるまで、少し後ろに下がってください。` };
+  if (top < .04) return { score: 0, issue: segment === 'upper' ? 'headOutside' : 'bodyOutside', centered: false, message: segment === 'upper' ? '頭が画面から切れています。頭の上に少し余白ができるまで、後ろに下がってください。' : '骨盤が画面から切れています。骨盤から足先までを映してください。' };
+  if (bottom > .96) return { score: 0, issue: segment === 'lower' ? 'feetOutside' : 'bodyOutside', centered: false, message: segment === 'lower' ? '足首が画面から切れています。足元に少し余白ができるまで、後ろに下がってください。' : '骨盤が画面から切れています。頭から骨盤までを映してください。' };
   if (left < .04 || right > .96) return { score: 0, issue: 'bodyOutside', centered: false, message: '体が左右で画面から切れています。中央に戻り、腕を体の横に下ろしてください。' };
-  if (height > .84) return { score: 0, issue: 'tooClose', centered: false, message: '体が大きく映っています。頭と足首に余白ができるまで、もう少し後ろに下がってください。' };
-  if (height < .48) return { score: 0, issue: 'tooFar', centered: false, message: '体が小さく映っています。全身を入れたまま、もう少し前に進んでください。' };
-  if (width < .12) return { score: 0, issue: 'turnBody', centered: false, message: '体の向きを確認できません。正面または側面を向き、肩と腰が見える位置に立ってください。' };
+  if (height > .88) return { score: 0, issue: 'tooClose', centered: false, message: `${captureLabel(captureView, segment)}が大きく映っています。対象部位に余白ができるまで、もう少し後ろに下がってください。` };
+  if (height < .25) return { score: 0, issue: 'tooFar', centered: false, message: `${captureLabel(captureView, segment)}が小さく映っています。対象部位を入れたまま、もう少し前に進んでください。` };
+  if (width < .08) return { score: 0, issue: 'turnBody', centered: false, message: '体の向きを確認できません。正面または側面を向き、対象部位が見える位置に立ってください。' };
   if ((left + right) / 2 < .36) return { score: 0, issue: 'moveRight', centered: false, message: '体が画面の左に寄っています。少し右に移動してください。' };
   if ((left + right) / 2 > .64) return { score: 0, issue: 'moveLeft', centered: false, message: '体が画面の右に寄っています。少し左に移動してください。' };
   const centered = 1 - Math.min(1, Math.abs((left + right) / 2 - .5) * 3);
-  return { score: Math.round((centered * .4 + (1 - Math.min(1, Math.abs(height - .66) / .22)) * .6) * 100), issue: 'fullBody', centered: true, message: '全身を確認しました。このまま自然に静止してください。' };
+  return { score: Math.round((centered * .4 + (1 - Math.min(1, Math.abs(height - .55) / .3)) * .6) * 100), issue: 'fullBody', centered: true, message: `${captureLabel(captureView, segment)}を確認しました。このまま自然に静止してください。` };
 }
 
 function guidanceFrom(issue: CaptureIssue, ready: boolean, moved: boolean): GuidanceState {
@@ -119,6 +136,7 @@ export default function PostureApp() {
   const [guide, setGuide] = useState('カメラを起動して、案内に従ってください。');
   const [guidanceState, setGuidanceState] = useState<GuidanceState>('DETECTING');
   const [view, setView] = useState<View>('front');
+  const [segment, setSegment] = useState<CaptureSegment>('upper');
   const [cameraFacing, setCameraFacing] = useState<CameraFacing>('user');
   const [captureReady, setCaptureReady] = useState(false);
   const [voiceGuidance, setVoiceGuidance] = useState(true);
@@ -128,8 +146,10 @@ export default function PostureApp() {
   const [testModeActive, setTestModeActive] = useState(false);
   const [testScenario, setTestScenario] = useState<TestScenario | null>(null);
   const [testDebug, setTestDebug] = useState<TestDebug | null>(null);
-  const [front, setFront] = useState<Shot>(emptyShot);
-  const [side, setSide] = useState<Shot>(emptyShot);
+  const [frontUpper, setFrontUpper] = useState<Shot>(emptyShot);
+  const [frontLower, setFrontLower] = useState<Shot>(emptyShot);
+  const [sideUpper, setSideUpper] = useState<Shot>(emptyShot);
+  const [sideLower, setSideLower] = useState<Shot>(emptyShot);
   const [evaluationResults, setEvaluationResults] = useState<EvaluationResult[]>([]);
 
   function speak(message: string, allowRapid = false) {
@@ -179,15 +199,22 @@ export default function PostureApp() {
     activateVoiceGuidance();
   }
 
-  function bodyCenter(landmarks: any[] | null) {
-    const leftShoulder = landmarks?.[11], rightShoulder = landmarks?.[12], leftHip = landmarks?.[23], rightHip = landmarks?.[24];
-    if (!leftShoulder || !rightShoulder || !leftHip || !rightHip) return null;
-    const shoulderCenter = { x: (leftShoulder.x + rightShoulder.x) / 2, y: (leftShoulder.y + rightShoulder.y) / 2 };
+  function bodyCenter(landmarks: any[] | null, captureSegment: CaptureSegment) {
+    const leftHip = landmarks?.[23], rightHip = landmarks?.[24];
+    if (!leftHip || !rightHip) return null;
     const hipCenter = { x: (leftHip.x + rightHip.x) / 2, y: (leftHip.y + rightHip.y) / 2 };
+    if (captureSegment === 'lower') {
+      const leftKnee = landmarks?.[25], rightKnee = landmarks?.[26];
+      if (!leftKnee || !rightKnee) return hipCenter;
+      return { x: (hipCenter.x + (leftKnee.x + rightKnee.x) / 2) / 2, y: (hipCenter.y + (leftKnee.y + rightKnee.y) / 2) / 2 };
+    }
+    const leftShoulder = landmarks?.[11], rightShoulder = landmarks?.[12];
+    if (!leftShoulder || !rightShoulder) return hipCenter;
+    const shoulderCenter = { x: (leftShoulder.x + rightShoulder.x) / 2, y: (leftShoulder.y + rightShoulder.y) / 2 };
     return { x: (shoulderCenter.x + hipCenter.x) / 2, y: (shoulderCenter.y + hipCenter.y) / 2 };
   }
-  function updateStability(landmarks: any[] | null, valid: boolean) {
-    const center = bodyCenter(landmarks);
+  function updateStability(landmarks: any[] | null, valid: boolean, captureSegment: CaptureSegment) {
+    const center = bodyCenter(landmarks, captureSegment);
     const data = stabilityRef.current;
     if (!center || !valid) { data.smoothed = null; data.previous = null; data.largeFrames = 0; stableFramesRef.current = 0; return { center, smoothed: null, dx: 0, dy: 0, magnitude: 0, unstable: false }; }
     const smoothed = data.smoothed ? { x: data.smoothed.x + (center.x - data.smoothed.x) * STABILITY_EMA_ALPHA, y: data.smoothed.y + (center.y - data.smoothed.y) * STABILITY_EMA_ALPHA } : center;
@@ -262,8 +289,8 @@ export default function PostureApp() {
       const landmarks = testFrame?.landmarks ?? (video && detector && video.videoWidth ? detector.detect(video).landmarks?.[0] ?? null : null);
       if (!landmarks) return;
 
-      const check = assess(landmarks);
-      const motion = updateStability(landmarks, check.score > 0);
+      const check = assess(landmarks, segment, view);
+      const motion = updateStability(landmarks, check.score > 0, segment);
       const ready = stableFramesRef.current >= (testModeActive ? 4 : 7);
       if (!ready) autoCaptureStartedRef.current = false;
       setCaptureReady(ready);
@@ -274,12 +301,12 @@ export default function PostureApp() {
         window.setTimeout(() => autoCapture(true), 0);
       }
       if (testModeActive && testFrame) {
-        const visibility = Math.min(...REQUIRED.map(index => landmarks[index]?.visibility ?? 0));
+        const visibility = Math.min(...REQUIRED[segment].map(index => landmarks[index]?.visibility ?? 0));
         setTestDebug({ scenario: testScenario?.id ?? '', state: testStateLabels[testFrame.state], issue: check.issue, fullBody: check.score > 0, centered: check.centered, stable: !motion.unstable && stableFramesRef.current > 0, confidence: visibility, stableFrames: stableFramesRef.current, bodyCenter: motion.center ?? undefined, smoothedCenter: motion.smoothed ?? undefined, movementX: motion.dx, movementY: motion.dy, movementMagnitude: motion.magnitude });
       }
     }, testModeActive ? 50 : 250);
     return () => window.clearInterval(timer);
-  }, [cameraOn, capturing, testModeActive, testScenario]);
+  }, [cameraOn, capturing, testModeActive, testScenario, segment, view]);
 
   async function startCamera(facing = cameraFacing) {
     try {
@@ -319,7 +346,7 @@ export default function PostureApp() {
       setCaptureReady(false);
       stableFramesRef.current = 0;
       stabilityRef.current = { smoothed: null, previous: null, largeFrames: 0 };
-      setGuide(view === 'front' ? '正面を向き、頭から足首までをガイド内に入れてください。' : '体の側面を向き、頭から足首までをガイド内に入れてください。');
+      setGuide(captureInstruction(view, segment));
     } catch { setGuide('カメラを開始できません。カメラの利用を許可してください。'); }
   }
   async function startCameraWithVoice() {
@@ -355,10 +382,14 @@ export default function PostureApp() {
     return { dataUrl: canvas.toDataURL('image/jpeg', .9), landmarks, imageWidth: canvas.width, imageHeight: canvas.height };
   }
   function saveShot(shot: Shot) {
-    if (view === 'front') {
-      setFront(shot); setView('side'); setGuide('正面を保存しました。続けて側面を撮影してください。');
+    if (view === 'front' && segment === 'upper') {
+      setFrontUpper(shot); setSegment('lower'); setGuide('正面の上半身を保存しました。続けて、骨盤から足先までを撮影してください。');
+    } else if (view === 'front' && segment === 'lower') {
+      setFrontLower(shot); setView('side'); setSegment('upper'); setGuide('正面の下半身を保存しました。続けて、側面の頭から骨盤までを撮影してください。');
+    } else if (view === 'side' && segment === 'upper') {
+      setSideUpper(shot); setSegment('lower'); setGuide('側面の上半身を保存しました。続けて、骨盤から足先までを撮影してください。');
     } else {
-      setSide(shot); setGuide('側面を保存しました。姿勢を評価できます。');
+      setSideLower(shot); setGuide('側面の下半身を保存しました。姿勢を評価できます。');
     }
     speak('撮影しました。');
     stopCamera();
@@ -372,7 +403,7 @@ export default function PostureApp() {
     const video = videoRef.current, detector = landmarkerRef.current;
     if (!video || !detector) return;
     const landmarks = detector.detect(video).landmarks?.[0] ?? null;
-    const check = assess(landmarks);
+    const check = assess(landmarks, segment, view);
     if (!landmarks || check.score === 0) {
       setGuide(`「OK」を受け取りましたが、${check.message}`);
       return;
@@ -384,7 +415,7 @@ export default function PostureApp() {
   function startVoiceCapture() {
     if (capturing || voiceListening) return;
     if (!captureReady) {
-      setGuide('全身が安定して映ると「OK」で撮影できます。ガイド内で少し静止してください。');
+      setGuide(`${captureLabel(view, segment)}が安定して映ると「OK」で撮影できます。ガイド内で少し静止してください。`);
       return;
     }
     const SpeechRecognition = (window as typeof window & { SpeechRecognition?: SpeechRecognitionConstructor; webkitSpeechRecognition?: SpeechRecognitionConstructor }).SpeechRecognition
@@ -417,7 +448,7 @@ export default function PostureApp() {
     const isTestRun = testModeRef.current;
     if ((!landmarker && !isTestRun) || capturing) return;
     if (!captureReady && !force) {
-      setGuide('全身が安定して映るまでお待ちください。頭から足首まで入れてください。');
+      setGuide(`${captureLabel(view, segment)}が安定して映るまでお待ちください。`);
       return;
     }
     const duration = isTestRun ? 1000 : 5000;
@@ -432,8 +463,8 @@ export default function PostureApp() {
       const video = videoRef.current, detector = landmarkerRef.current;
       if (!testFrame && (!video || !detector || !video.videoWidth || !video.videoHeight)) return;
       const landmarks = testFrame?.landmarks ?? detector?.detect(video!).landmarks?.[0] ?? null;
-      const check = assess(landmarks);
-      const center = bodyCenter(landmarks);
+      const check = assess(landmarks, segment, view);
+      const center = bodyCenter(landmarks, segment);
       const smooth = center && countdownSmoothed ? { x: countdownSmoothed.x + (center.x - countdownSmoothed.x) * STABILITY_EMA_ALPHA, y: countdownSmoothed.y + (center.y - countdownSmoothed.y) * STABILITY_EMA_ALPHA } : center;
       const movement = smooth && countdownPrevious ? Math.hypot(smooth.x - countdownPrevious.x, smooth.y - countdownPrevious.y) : 0;
       countdownLargeFrames = movement > STABILITY_EXIT_THRESHOLD ? countdownLargeFrames + 1 : 0;
@@ -456,36 +487,45 @@ export default function PostureApp() {
     captureTimerRef.current = timer;
   }
   function evaluate() {
-    if (!front.landmarks || !side.landmarks) { setGuide('正面と側面の両方を撮影してください。'); return; }
-    const frontMeasurement = createMeasurementOverlay(createPoseSkeleton(front.landmarks, front.imageWidth ?? 1, front.imageHeight ?? 1), 'front')?.measurement;
-    const sideMeasurement = createMeasurementOverlay(createPoseSkeleton(side.landmarks, side.imageWidth ?? 1, side.imageHeight ?? 1), 'side', side.manualC7)?.measurement;
-    setEvaluationResults([...evaluateMeasurements(sideMeasurement ?? null, 1), ...evaluateMeasurements(frontMeasurement ?? null, 1).filter(result => result.measurementId !== 'cva')]);
+    if (![frontUpper, frontLower, sideUpper, sideLower].every(shot => shot.landmarks)) { setGuide('正面・側面それぞれの上半身と下半身を撮影してください。'); return; }
+    const frontMeasurement = createMeasurementOverlay(createPoseSkeleton(frontUpper.landmarks, frontUpper.imageWidth ?? 1, frontUpper.imageHeight ?? 1), 'front', undefined, 'upper')?.measurement;
+    const sideUpperMeasurement = createMeasurementOverlay(createPoseSkeleton(sideUpper.landmarks, sideUpper.imageWidth ?? 1, sideUpper.imageHeight ?? 1), 'side', sideUpper.manualC7, 'upper')?.measurement;
+    const sideLowerMeasurement = createMeasurementOverlay(createPoseSkeleton(sideLower.landmarks, sideLower.imageWidth ?? 1, sideLower.imageHeight ?? 1), 'side', undefined, 'lower')?.measurement;
+    const measurement: PostureMeasurement = {
+      ...frontMeasurement,
+      earOffset: sideUpperMeasurement?.earOffset,
+      shoulderOffset: sideUpperMeasurement?.shoulderOffset,
+      hipOffset: sideLowerMeasurement?.hipOffset ?? sideUpperMeasurement?.hipOffset,
+      kneeOffset: sideLowerMeasurement?.kneeOffset,
+      ankleOffset: sideLowerMeasurement?.ankleOffset,
+      cva: sideUpperMeasurement?.cva ?? null,
+    };
+    setEvaluationResults(evaluateMeasurements(measurement, 1));
     setGuide('研究情報に基づく項目別の参考評価を表示しました。');
   }
 
   return <main className="shell">
-    <header className="hero"><div><span className="eyebrow">POSTURE CHECK</span><h1>姿勢から、改善を数字で確認する。</h1><p>カメラ映像を端末内で解析します。写真はサーバーへ送信しません。</p></div><div className="heroScore"><span>測定項目</span><strong>3</strong><small>肩 / 骨盤 / 体幹</small></div></header>
+    <header className="hero"><div><span className="eyebrow">POSTURE CHECK</span><h1>姿勢から、改善を数字で確認する。</h1><p>カメラ映像を端末内で解析します。写真はサーバーへ送信しません。</p></div><div className="heroScore"><span>測定項目</span><strong>3</strong><small>肩・骨盤の傾き / 前後位置 / CVA</small></div></header>
     <section className="card"><div className="sectionHead"><div><span className="step">STEP 1</span><h2>自動・音声撮影</h2></div><span className={loading ? 'status wait' : 'status ok'}>{loading ? 'モデル読込中' : 'カメラ準備OK'}</span></div>
-      <div className="guideGrid"><div><b>正面</b><p>体の正面を向き、腕を自然に下ろします。</p></div><div><b>側面</b><p>体の側面を向き、普段どおりに立ちます。</p></div></div>
+      <div className="guideGrid"><div><b>1. 正面・上半身</b><p>頭から骨盤まで。肩と骨盤が入るように撮影します。</p></div><div><b>2. 正面・下半身</b><p>骨盤から足先まで。膝と足首が入るように撮影します。</p></div><div><b>3. 側面・上半身</b><p>頭から骨盤まで。耳・肩・腰を確認します。</p></div><div><b>4. 側面・下半身</b><p>骨盤から足先まで。膝と足首を確認します。</p></div></div>
       {TEST_MODE_ENABLED && <aside className="testMode" aria-label="開発用テストモード"><b>TEST MODE（開発用）</b><p>実カメラを使わず、MediaPipeと共通の判定ロジックへランドマークを入力します。</p><div className="testButtons">{testScenarios.map(scenario => <button key={scenario.id} className="ghost" onClick={() => startTestScenario(scenario)}>{scenario.id}</button>)}</div><div className="testButtons">{(Object.keys(testStateLabels) as TestPoseState[]).map(state => <button key={state} className="ghost" onClick={() => startTestState(state)}>{testStateLabels[state]}</button>)}</div>{testDebug && <div className="testDebug"><b>{testDebug.scenario}</b><span>状態: {guidanceState} / テスト: {testDebug.state} / 判定理由: {testDebug.issue}</span><span>全身: {testDebug.fullBody ? 'OK' : 'NG'} / 中央: {testDebug.centered ? 'OK' : 'NG'} / 安定: {testDebug.stable ? 'OK' : 'NG'} / 安定フレーム: {testDebug.stableFrames}</span><span>Body: {testDebug.bodyCenter ? `${testDebug.bodyCenter.x.toFixed(3)}, ${testDebug.bodyCenter.y.toFixed(3)}` : '—'} / EMA: {testDebug.smoothedCenter ? `${testDebug.smoothedCenter.x.toFixed(3)}, ${testDebug.smoothedCenter.y.toFixed(3)}` : '—'}</span><span>移動: X {testDebug.movementX.toFixed(4)} / Y {testDebug.movementY.toFixed(4)} / 大きさ {testDebug.movementMagnitude.toFixed(4)} / 進入しきい値 {STABILITY_ENTER_THRESHOLD} / 解除しきい値 {STABILITY_EXIT_THRESHOLD}</span><span>Visibility: {testDebug.confidence.toFixed(2)} / カウント: {countdown}</span><span>Speech: {speechSupported ? '対応' : '未確認・未対応'} / 有効: {voiceGuidance ? 'ON' : 'OFF'} / 初期化: {speechInitialized ? '済' : '未'}</span><span>最終発話: {speechRef.current.at ? new Date(speechRef.current.at).toLocaleTimeString() : 'なし'}</span>{speechError && <span>{speechError}</span>}</div>}</aside>}
       {!cameraOn && <div className="captureSetup"><div><b>カメラ</b><div className="tabs"><button className={cameraFacing === 'user' ? 'active' : ''} onClick={() => setCameraFacing('user')}>インカメラ</button><button className={cameraFacing === 'environment' ? 'active' : ''} onClick={() => setCameraFacing('environment')}>アウトカメラ</button></div></div><div><b>音声ガイド</b><div className="tabs"><button className={voiceGuidance ? 'active' : ''} onClick={activateVoiceGuidance}>ON</button><button className={!voiceGuidance ? 'active' : ''} onClick={() => { voiceGuidanceRef.current = false; setVoiceGuidance(false); }}>OFF</button></div></div></div>}
-      <div className={`cameraBox ${cameraOn ? 'captureActive' : ''}`}><video ref={videoRef} playsInline muted className={cameraOn ? '' : 'hidden'} style={{ transform: cameraFacing === 'user' ? 'scaleX(-1)' : undefined }} />{!cameraOn && <div className="cameraPlaceholder"><div className="silhouette">♙</div><p>{view === 'front' ? '正面撮影ガイド' : '側面撮影ガイド'}</p><div className="guideLine" /></div>}{cameraOn && <><button className="captureClose" aria-label="撮影を終了" onClick={stopCamera}>×</button><span className="captureStatus">{capturing ? '撮影します' : captureReady ? '準備完了' : '位置調整中'}</span><div className="frameGuide" />{capturing && <div className="countdownOverlay">{countdown}</div>}<div className="liveGuide"><b>{capturing ? 'そのまま動かずに立ってください' : GUIDANCE[guidanceState]}</b><span>{capturing ? '姿勢が崩れると撮影をやり直します。' : guide}</span></div></>}</div><canvas ref={canvasRef} className="hidden" />
+      <div className={`cameraBox ${cameraOn ? 'captureActive' : ''}`}><video ref={videoRef} playsInline muted className={cameraOn ? '' : 'hidden'} style={{ transform: cameraFacing === 'user' ? 'scaleX(-1)' : undefined }} />{!cameraOn && <div className="cameraPlaceholder"><div className="silhouette">♙</div><p>{captureLabel(view, segment)}撮影ガイド</p><div className="guideLine" /></div>}{cameraOn && <><button className="captureClose" aria-label="撮影を終了" onClick={stopCamera}>×</button><span className="captureStatus">{capturing ? '撮影します' : captureReady ? '準備完了' : `${captureLabel(view, segment)}・位置調整中`}</span><div className={`frameGuide ${segment}`} />{capturing && <div className="countdownOverlay">{countdown}</div>}<div className="liveGuide"><b>{capturing ? 'そのまま動かずに立ってください' : GUIDANCE[guidanceState]}</b><span>{capturing ? '姿勢が崩れると撮影をやり直します。' : guide}</span></div></>}</div><canvas ref={canvasRef} className="hidden" />
       {!cameraOn && <div className="actions"><button className="primary" onClick={voiceGuidance ? startCameraWithVoice : startCameraWithoutVoice} disabled={loading}>撮影開始</button></div>} {!cameraOn && <p className="notice" aria-live="polite">{guide}</p>}
     </section>
-    <section className="card"><div className="sectionHead"><div><span className="step">STEP 2</span><h2>撮影の確認</h2></div></div><div className="shots"><ShotCard title="正面" shot={front} /><ShotCard title="側面" shot={side} /></div><button className="primary wide" onClick={evaluate}>姿勢を評価する</button></section>
-    <section className="card"><div className="sectionHead"><div><span className="step">STEP 3</span><h2>測定値と研究上の参考情報</h2></div></div>{!evaluationResults.length ? <div className="emptyResult">正面・側面を撮影後、「姿勢を評価する」を押すと項目別の参考情報を表示します。</div> : <div className="resultTable">{evaluationResults.map(result => <div className="resultRow" key={result.measurementId}><div><b>{{ cva: 'CVA', shoulderTilt: '肩の傾き', pelvisTilt: '骨盤の傾き', earOffset: '耳の前後位置', shoulderOffset: '肩の前後位置', hipOffset: '股関節の前後位置', kneeOffset: '膝の前後位置', ankleOffset: '足首の前後位置' }[result.measurementId] ?? result.measurementId}</b></div>{result.value != null && <strong>{`${result.value >= 0 ? '+' : ''}${result.value.toFixed(result.unit === 'normalized' ? 3 : 1)}${result.unit === 'degree' ? '°' : '（正規化座標）'}`}</strong>}<p>{result.explanation}</p>{result.reference && <details><summary>出典を見る</summary><p>{result.reference.sourceTitle}</p><p>{result.reference.sourceAuthors}（{result.reference.sourceYear}）</p><p>対象: {result.reference.population}</p><p>方法: {result.reference.measurementMethod}</p><a href={result.reference.sourceUrl} target="_blank" rel="noreferrer">PubMedで確認</a></details>}</div>)}</div>}<div className="evidence"><b>ご利用にあたって</b><p>本サービスの姿勢測定・評価は研究情報に基づく参考情報であり、医療上の診断を行うものではありません。</p></div></section>
-    {evaluationResults.length > 0 && <PlanBuilder results={evaluationResults} onRemeasure={() => { setView('front'); setGuide('再測定する場合は、正面からカメラを起動してください。'); window.scrollTo({ top: 0, behavior: 'smooth' }); }} />}
+    <section className="card"><div className="sectionHead"><div><span className="step">STEP 2</span><h2>分割撮影の確認</h2></div></div><div className="shots"><ShotCard title="正面・上半身" shot={frontUpper} captureType="front" segment="upper" /><ShotCard title="正面・下半身" shot={frontLower} captureType="front" segment="lower" /><ShotCard title="側面・上半身" shot={sideUpper} captureType="side" segment="upper" onC7Change={point => { setSideUpper(shot => ({ ...shot, manualC7: point })); if (evaluationResults.length) { setEvaluationResults([]); setGuide('C7の位置を変更しました。もう一度「姿勢を評価する」を押してください。'); } }} /><ShotCard title="側面・下半身" shot={sideLower} captureType="side" segment="lower" /></div><button className="primary wide" onClick={evaluate}>姿勢を評価する</button></section>
+    <section className="card"><div className="sectionHead"><div><span className="step">STEP 3</span><h2>測定値と研究上の参考情報</h2></div></div>{!evaluationResults.length ? <div className="emptyResult">正面・側面それぞれの上半身・下半身を撮影後、「姿勢を評価する」を押すと項目別の参考情報を表示します。</div> : <div className="resultTable">{evaluationResults.map(result => <div className="resultRow" key={result.measurementId}><div><b>{{ cva: 'CVA', shoulderTilt: '肩の傾き', pelvisTilt: '骨盤の傾き', earOffset: '耳の前後位置', shoulderOffset: '肩の前後位置', hipOffset: '股関節の前後位置', kneeOffset: '膝の前後位置', ankleOffset: '足首の前後位置' }[result.measurementId] ?? result.measurementId}</b></div>{result.value != null && <strong>{`${result.value >= 0 && result.measurementId !== 'cva' ? '+' : ''}${result.value.toFixed(result.unit === 'normalized' ? 3 : 1)}${result.unit === 'degree' ? '°' : '（正規化座標）'}`}</strong>}<p>{result.explanation}</p>{result.reference && <details><summary>出典を見る</summary><p>{result.reference.sourceTitle}</p><p>{result.reference.sourceAuthors}（{result.reference.sourceYear}）</p><p>対象: {result.reference.population}</p><p>方法: {result.reference.measurementMethod}</p><a href={result.reference.sourceUrl} target="_blank" rel="noreferrer">PubMedで確認</a></details>}</div>)}</div>}<div className="evidence"><b>ご利用にあたって</b><p>本サービスの姿勢測定・評価は研究情報に基づく参考情報であり、医療上の診断を行うものではありません。</p></div></section>
+    {evaluationResults.length > 0 && <PlanBuilder results={evaluationResults} onRemeasure={() => { setView('front'); setSegment('upper'); setGuide('再測定する場合は、正面の上半身からカメラを起動してください。'); window.scrollTo({ top: 0, behavior: 'smooth' }); }} />}
     <footer>このサービスは姿勢の改善目安を示すもので、医療診断を行うものではありません。強い痛みやしびれがある場合は医療機関にご相談ください。</footer>
   </main>;
 }
-function ShotCard({ title, shot }: { title: string; shot: Shot }) {
+function ShotCard({ title, shot, captureType, segment, onC7Change }: { title: string; shot: Shot; captureType: View; segment: CaptureSegment; onC7Change?: (point: { x: number; y: number } | undefined) => void }) {
   const [showSkeleton, setShowSkeleton] = useState(true);
   const [showReferences, setShowReferences] = useState(true);
   const [showMeasurements, setShowMeasurements] = useState(true);
-  const captureType = title === '正面' ? 'front' : 'side';
   const pose = createPoseSkeleton(shot.landmarks, shot.imageWidth ?? 1, shot.imageHeight ?? 1);
-  const overlay = createMeasurementOverlay(pose, captureType);
+  const overlay = createMeasurementOverlay(pose, captureType, shot.manualC7, segment);
   const signedAngle = (value?: number) => value == null ? '—' : `${value >= 0 ? '+' : ''}${value.toFixed(1)}°`;
   const normalized = (value?: number) => value == null ? '—' : `${value >= 0 ? '+' : ''}${value.toFixed(3)}`;
-  return <div className="shotCard"><div className="shotTitle"><b>{title}</b><span>{shot.landmarks ? '最適フレーム選定済み' : '未撮影'}</span></div>{shot.dataUrl ? <><PoseOverlay imageUrl={shot.dataUrl} pose={pose} captureType={captureType} layers={{ skeleton: showSkeleton, references: showReferences, measurements: showMeasurements }} /><div className="overlayToggles"><button className="skeletonToggle" onClick={() => setShowSkeleton(value => !value)}>{`骨格 ${showSkeleton ? 'ON' : 'OFF'}`}</button><button className="skeletonToggle" onClick={() => setShowReferences(value => !value)}>{`基準線 ${showReferences ? 'ON' : 'OFF'}`}</button><button className="skeletonToggle" onClick={() => setShowMeasurements(value => !value)}>{`測定値 ${showMeasurements ? 'ON' : 'OFF'}`}</button></div>{showMeasurements && overlay && <div className="measurementPanel"><b>{captureType === 'front' ? '正面の測定値' : `側面の測定値（${overlay.side === 'left' ? '左側' : '右側'}）`}</b>{captureType === 'front' ? <><span>肩ライン: {signedAngle(overlay.measurement.shoulderTilt)}</span><span>骨盤ライン: {signedAngle(overlay.measurement.pelvisTilt)}</span></> : <><span>耳: {normalized(overlay.measurement.earOffset)}（正規化座標）</span><span>肩: {normalized(overlay.measurement.shoulderOffset)} / 腰: {normalized(overlay.measurement.hipOffset)}</span><span>膝: {normalized(overlay.measurement.kneeOffset)} / 足首: {normalized(overlay.measurement.ankleOffset)}</span></>}</div>}</> : <div className="emptyShot">{title}写真</div>}<small>撮影画像と同じ座標系で、骨格・基準線・測定値を重ねて表示します。</small></div>;
+  return <div className="shotCard"><div className="shotTitle"><b>{title}</b><span>{shot.landmarks ? '最適フレーム選定済み' : '未撮影'}</span></div>{shot.dataUrl ? <><PoseOverlay imageUrl={shot.dataUrl} pose={pose} captureType={captureType} segment={segment} manualC7={shot.manualC7} onPickPoint={onC7Change && shot.landmarks ? point => onC7Change(point) : undefined} layers={{ skeleton: showSkeleton, references: showReferences, measurements: showMeasurements }} />{onC7Change && shot.landmarks && <div className="c7Hint"><span>{shot.manualC7 ? `C7を指定済み（CVA ${overlay?.measurement.cva?.toFixed(1) ?? '—'}°）。写真をタップすると位置を修正できます。` : 'CVAを測るには、首の付け根で一番出っ張った骨（第7頸椎・C7）の位置を写真上でタップしてください。'}</span>{shot.manualC7 && <button className="ghost" onClick={() => onC7Change(undefined)}>C7を解除</button>}</div>}<div className="overlayToggles"><button className="skeletonToggle" onClick={() => setShowSkeleton(value => !value)}>{`骨格 ${showSkeleton ? 'ON' : 'OFF'}`}</button><button className="skeletonToggle" onClick={() => setShowReferences(value => !value)}>{`基準線 ${showReferences ? 'ON' : 'OFF'}`}</button><button className="skeletonToggle" onClick={() => setShowMeasurements(value => !value)}>{`測定値 ${showMeasurements ? 'ON' : 'OFF'}`}</button></div>{showMeasurements && overlay && <div className="measurementPanel"><b>{title}の測定値</b>{captureType === 'front' ? <><span>肩ライン: {signedAngle(overlay.measurement.shoulderTilt)}</span><span>骨盤ライン: {signedAngle(overlay.measurement.pelvisTilt)}</span></> : <>{segment !== 'lower' && <span>CVA: {overlay.measurement.cva == null ? 'C7未指定' : `${overlay.measurement.cva.toFixed(1)}°`}</span>}<span>耳: {normalized(overlay.measurement.earOffset)} / 肩: {normalized(overlay.measurement.shoulderOffset)}</span><span>腰: {normalized(overlay.measurement.hipOffset)} / 膝: {normalized(overlay.measurement.kneeOffset)} / 足首: {normalized(overlay.measurement.ankleOffset)}</span></>}</div>}</> : <div className="emptyShot">{title}写真</div>}<small>撮影画像と同じ座標系で、骨格・基準線・測定値を重ねて表示します。</small></div>;
 }

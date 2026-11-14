@@ -9,7 +9,7 @@ export function evaluateMeasurements(measurement: PostureMeasurement | null, con
   const results = front.filter(id => measurement[id] !== undefined).map(id => noEvidence(id, measurement[id], 'degree'));
   for (const id of ['earOffset', 'shoulderOffset', 'hipOffset', 'kneeOffset', 'ankleOffset'] as const) if (measurement[id] !== undefined) results.push(noEvidence(id, measurement[id], 'normalized'));
   const criterion = REFERENCE_CRITERIA.find(item => item.measurementId === 'cva');
-  if (measurement.cva == null) results.unshift({ measurementId: 'cva', unit: 'degree', status: 'MEASUREMENT_UNRELIABLE', explanation: 'CVAを測定できません。C7の位置を手動で指定してください。', confidence });
+  if (measurement.cva == null) results.unshift({ measurementId: 'cva', unit: 'degree', status: 'MEASUREMENT_UNRELIABLE', explanation: 'CVAを測定できません。STEP 2の「側面・上半身」の写真でC7の位置をタップしてください。', confidence });
   else if (criterion?.cutoff != null) results.unshift({ measurementId: 'cva', value: measurement.cva, unit: 'degree', status: measurement.cva < criterion.cutoff ? 'RESEARCH_CUTOFF' : 'REFERENCE', reference: criterion, confidence, explanation: measurement.cva < criterion.cutoff ? '今回の測定値は、この研究で報告された識別カットオフを下回っています。' : '今回の測定値は、この研究で報告された識別カットオフ以上です。' });
   return results;
 }

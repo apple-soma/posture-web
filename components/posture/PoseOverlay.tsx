@@ -1,6 +1,6 @@
 'use client';
 
-import { createMeasurementOverlay, toImagePoint } from '../../lib/postureMeasurement';
+import { createMeasurementOverlay, toImagePoint, type CaptureSegment, type Point } from '../../lib/postureMeasurement';
 
 export type CaptureType = 'front' | 'side';
 export type PosePoint = { name: string; x: number; y: number; z?: number; visibility?: number };
@@ -14,16 +14,36 @@ function selectVisibleSide(points: Map<string, PosePoint>): 'left' | 'right' { c
 function sideConnections(side: 'left' | 'right'): Array<[string, string]> { return [['nose', `${side}Ear`], [`${side}Ear`, `${side}Shoulder`], [`${side}Shoulder`, `${side}Elbow`], [`${side}Elbow`, `${side}Wrist`], [`${side}Shoulder`, `${side}Hip`], [`${side}Hip`, `${side}Knee`], [`${side}Knee`, `${side}Ankle`], [`${side}Ankle`, `${side}Heel`], [`${side}Ankle`, `${side}FootIndex`]]; }
 export function createPoseSkeleton(landmarks: Landmark[] | null, imageWidth: number, imageHeight: number): PoseSkeleton | null { if (!landmarks?.length) return null; return { imageWidth, imageHeight, points: POSE_POINT_INDICES.flatMap(([name, index]) => { const point = landmarks[index]; return point ? [{ name, x: point.x, y: point.y, z: point.z, visibility: point.visibility }] : []; }) }; }
 
-export function PoseOverlay({ imageUrl, pose, captureType, layers }: { imageUrl: string; pose: PoseSkeleton | null; captureType: CaptureType; layers: PoseOverlayLayers }) {
+type PoseOverlayProps = {
+  imageUrl: string;
+  pose: PoseSkeleton | null;
+  captureType: CaptureType;
+  segment?: CaptureSegment;
+  manualC7?: Point;
+  // When provided, a tap on the photo reports its normalized (0–1) image position.
+  onPickPoint?: (point: Point) => void;
+  layers: PoseOverlayLayers;
+};
+
+export function PoseOverlay({ imageUrl, pose, captureType, segment = 'full', manualC7, onPickPoint, layers }: PoseOverlayProps) {
   const points = new Map((pose?.points ?? []).filter(point => (point.visibility ?? 1) >= MIN_VISIBILITY).map(point => [point.name, point]));
   const connections = captureType === 'front' ? FRONT_CONNECTIONS : sideConnections(selectVisibleSide(points));
   const width = pose?.imageWidth || 1, height = pose?.imageHeight || 1;
-  const overlay = createMeasurementOverlay(pose, captureType);
+  const overlay = createMeasurementOverlay(pose, captureType, manualC7, segment);
   const pointAt = (point: PosePoint) => toImagePoint(point, width, height);
-  return <div className="poseOverlay"><img src={imageUrl} alt={`${captureType === 'front' ? '正面' : '側面'}姿勢`} /><svg className="poseOverlaySvg" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-label="姿勢測定オーバーレイ">
+  const ear = overlay?.side ? points.get(`${overlay.side}Ear`) : undefined;
+  const handlePick = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (!onPickPoint) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    const clamp = (value: number) => Math.min(1, Math.max(0, value));
+    onPickPoint({ x: clamp((event.clientX - rect.left) / rect.width), y: clamp((event.clientY - rect.top) / rect.height) });
+  };
+  return <div className={`poseOverlay${onPickPoint ? ' pickable' : ''}`} onClick={handlePick}><img src={imageUrl} alt={`${captureType === 'front' ? '正面' : '側面'}姿勢`} /><svg className="poseOverlaySvg" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-label="姿勢測定オーバーレイ">
     {layers.references && overlay?.referenceLines.map(line => { const a = toImagePoint(line.start, width, height), b = toImagePoint(line.end, width, height); return <line className={`referenceLine ${line.type}`} key={line.id} x1={a.x} y1={a.y} x2={b.x} y2={b.y} />; })}
     {layers.skeleton && <>{connections.map(([from, to]) => { const start = points.get(from), end = points.get(to); if (!start || !end) return null; const a = pointAt(start), b = pointAt(end); return <line className="skeletonLine" key={`${from}-${to}`} x1={a.x} y1={a.y} x2={b.x} y2={b.y} />; })}{[...points.values()].map(point => { const position = pointAt(point); return <circle key={point.name} cx={position.x} cy={position.y} r={Math.max(width, height) * .007} />; })}</>}
     {layers.measurements && overlay?.referenceLines.filter(line => line.type === 'shoulder' || line.type === 'pelvis').map(line => { const a = toImagePoint(line.start, width, height), b = toImagePoint(line.end, width, height); const value = line.type === 'shoulder' ? overlay.measurement.shoulderTilt : overlay.measurement.pelvisTilt; return <g key={`${line.id}-measure`}><line className="measurementLine" x1={a.x} y1={a.y} x2={b.x} y2={b.y} /><text className="measurementLabel" x={(a.x + b.x) / 2} y={(a.y + b.y) / 2 - 12}>{`${line.type === 'shoulder' ? '肩' : '骨盤'} ${value != null && value >= 0 ? '+' : ''}${value?.toFixed(1) ?? '—'}°`}</text></g>; })}
-    {layers.measurements && captureType === 'side' && overlay && (() => { const plumb = overlay.referenceLines.find(line => line.type === 'plumb'); if (!plumb || !overlay.side) return null; const entries = [['耳', 'Ear', overlay.measurement.earOffset], ['肩', 'Shoulder', overlay.measurement.shoulderOffset], ['腰', 'Hip', overlay.measurement.hipOffset], ['膝', 'Knee', overlay.measurement.kneeOffset], ['足首', 'Ankle', overlay.measurement.ankleOffset]] as const; return entries.map(([label, name, value]) => { const point = points.get(`${overlay.side}${name}`); if (!point) return null; const a = pointAt(point), b = toImagePoint({ x: plumb.start.x, y: point.y }, width, height); return <g key={label}><line className="measurementLine" x1={a.x} y1={a.y} x2={b.x} y2={b.y} /><text className="measurementLabel" x={(a.x + b.x) / 2} y={a.y - 12}>{`${label} ${value != null && value >= 0 ? '+' : ''}${value?.toFixed(3) ?? '—'}`}</text></g>; }); })()}
+    {layers.measurements && captureType === 'side' && overlay && (() => { const plumb = overlay.referenceLines.find(line => line.type === 'plumb'); if (!plumb || !overlay.side) return null; const entries = [['耳', 'Ear', overlay.measurement.earOffset], ['肩', 'Shoulder', overlay.measurement.shoulderOffset], ['腰', 'Hip', overlay.measurement.hipOffset], ['膝', 'Knee', overlay.measurement.kneeOffset], ['足首', 'Ankle', overlay.measurement.ankleOffset]] as const; return entries.map(([label, name, value]) => { const point = points.get(`${overlay.side}${name}`); if (!point || value === undefined) return null; const a = pointAt(point), b = toImagePoint({ x: plumb.start.x, y: point.y }, width, height); return <g key={label}><line className="measurementLine" x1={a.x} y1={a.y} x2={b.x} y2={b.y} /><text className="measurementLabel" x={(a.x + b.x) / 2} y={a.y - 12}>{`${label} ${value != null && value >= 0 ? '+' : ''}${value?.toFixed(3) ?? '—'}`}</text></g>; }); })()}
+    {manualC7 && (() => { const c7 = toImagePoint(manualC7, width, height); const e = ear ? pointAt(ear) : null; const r = Math.max(width, height) * .011; return <g className="c7Marker">{layers.measurements && e && <><line className="measurementLine" x1={c7.x} y1={c7.y} x2={e.x} y2={e.y} /><line className="referenceLine" x1={c7.x} y1={c7.y} x2={c7.x + (e.x >= c7.x ? 1 : -1) * Math.max(width, height) * .12} y2={c7.y} /><text className="measurementLabel" x={c7.x} y={c7.y + r * 3.2}>{`CVA ${overlay?.measurement.cva?.toFixed(1) ?? '—'}°`}</text></>}<circle className="c7Point" cx={c7.x} cy={c7.y} r={r} /></g>; })()}
   </svg></div>;
 }

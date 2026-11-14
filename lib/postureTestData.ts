@@ -65,7 +65,8 @@ export function createTestLandmarks(state: TestPoseState, frame = 0): Landmark[]
 }
 
 export function getTestManualC7(state: TestPoseState): { x: number; y: number } | undefined {
-  if (state === 'cvaAboveCutoff') return { x: .50, y: .50 };
-  if (state === 'cvaBelowCutoff') return { x: .50, y: .42 };
+  // Test shot is 540x960, left ear at (.45, .16); angles use pixel space.
+  if (state === 'cvaAboveCutoff') return { x: .53, y: .23 }; // ≈57°
+  if (state === 'cvaBelowCutoff') return { x: .62, y: .22 }; // ≈32°
   return undefined;
 }
