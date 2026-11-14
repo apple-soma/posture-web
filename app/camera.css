@@ -162,6 +162,27 @@
   cursor: pointer;
 }
 
+.poseOverlay.pickable { cursor: crosshair; }
+
+.poseOverlaySvg .c7Point {
+  fill: #ff3d6e;
+  stroke: #fff;
+  stroke-width: 3;
+}
+
+.c7Hint {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 9px 10px;
+  border-radius: 9px;
+  background: #fff6e5;
+  color: #6a4300;
+  font-size: 12px;
+}
+
 .overlayToggles {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
