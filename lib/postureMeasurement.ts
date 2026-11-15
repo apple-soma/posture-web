@@ -12,6 +12,10 @@ export type PostureMeasurement = {
   hipOffset?: number;
   kneeOffset?: number;
   ankleOffset?: number;
+  // Display-only indicators (spec 6.1). Angles from the vertical, in degrees.
+  trunkLateralTilt?: number; // front: hip midpoint → shoulder midpoint. + = upper body toward the image right
+  neckTilt?: number; // side: shoulder → ear. + = ear in front of the shoulder
+  trunkLean?: number; // side: hip → shoulder. + = shoulder in front of the hip
   // C7 is not available from Pose Landmarker; it is tapped by the user on the side-upper photo.
   cva: number | null;
 };
@@ -30,6 +34,13 @@ const signedHorizontalAngle = (a: Point, b: Point, width: number, height: number
 // CVA: angle between the horizontal and the C7→ear line, independent of facing direction.
 const craniovertebralAngle = (c7: Point, ear: Point, width: number, height: number) =>
   Math.atan2((c7.y - ear.y) * height, Math.abs(ear.x - c7.x) * width) * 180 / Math.PI;
+// Angle between the vertical through `base` and the base→top line, in pixel space.
+// `direction` (+1/−1) maps image x to the sign convention; with null the magnitude is returned.
+const angleFromVertical = (base: Point, top: Point, width: number, height: number, direction: number | null) => {
+  const dx = (top.x - base.x) * width, dy = (base.y - top.y) * height;
+  const angle = Math.atan2(direction == null ? Math.abs(dx) : dx * direction, dy) * 180 / Math.PI;
+  return angle;
+};
 const offset = (point: PosePoint | undefined, plumbX: number) => point ? point.x - plumbX : undefined;
 
 function visibleSide(points: Map<string, PosePoint>): 'left' | 'right' {
@@ -55,7 +66,7 @@ export function createMeasurementOverlay(pose: PoseSkeleton | null, captureType:
         { id: 'pelvis-line', type: 'pelvis', start: leftHip!, end: rightHip!, label: '骨盤ライン' },
         { id: 'body-center', type: 'vertical', start: { x: centerX, y: .08 }, end: { x: centerX, y: .95 }, label: '身体中心線' },
       ],
-      measurement: { shoulderTilt: leftShoulder && rightShoulder ? signedHorizontalAngle(leftShoulder, rightShoulder, width, height) : undefined, pelvisTilt: signedHorizontalAngle(leftHip!, rightHip!, width, height), cva: null },
+      measurement: { shoulderTilt: leftShoulder && rightShoulder ? signedHorizontalAngle(leftShoulder, rightShoulder, width, height) : undefined, pelvisTilt: signedHorizontalAngle(leftHip!, rightHip!, width, height), trunkLateralTilt: shoulders && segment !== 'lower' ? angleFromVertical(hips, shoulders, width, height, 1) : undefined, cva: null },
     };
   }
 
@@ -65,6 +76,10 @@ export function createMeasurementOverlay(pose: PoseSkeleton | null, captureType:
   if (!reference) return null;
   const plumbX = reference.x;
   const cva = manualC7 && ear ? craniovertebralAngle(manualC7, ear, width, height) : null;
+  // The face points the way the nose is from the ear; that side counts as "forward".
+  const nose = points.get('nose');
+  const forward = nose && ear ? (Math.sign(nose.x - ear.x) || 1) : null;
+  const upper = segment !== 'lower';
   return {
     side,
     referenceLines: [{ id: 'plumb-line', type: 'plumb', start: { x: plumbX, y: .08 }, end: { x: plumbX, y: .95 }, label: segment === 'full' ? '足首を通る垂直基準線' : '股関節を通る垂直基準線' }],
@@ -74,6 +89,8 @@ export function createMeasurementOverlay(pose: PoseSkeleton | null, captureType:
       hipOffset: offset(hip, plumbX),
       kneeOffset: segment === 'upper' ? undefined : offset(knee, plumbX),
       ankleOffset: segment === 'upper' ? undefined : offset(ankle, plumbX),
+      neckTilt: upper && shoulder && ear ? angleFromVertical(shoulder, ear, width, height, forward) : undefined,
+      trunkLean: upper && hip && shoulder ? angleFromVertical(hip, shoulder, width, height, forward) : undefined,
       cva,
     },
   };

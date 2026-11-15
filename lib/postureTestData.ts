@@ -58,7 +58,9 @@ export function createTestLandmarks(state: TestPoseState, frame = 0): Landmark[]
   if (state === 'normalSide' || state === 'forwardHeadSide') {
     const sidePoints: Record<number, [number, number]> = { 0: [.52, .13], 7: [.46, .16], 8: [.54, .16], 11: [.46, .30], 12: [.52, .30], 13: [.43, .45], 14: [.55, .45], 15: [.42, .58], 16: [.57, .58], 23: [.47, .58], 24: [.52, .58], 25: [.48, .75], 26: [.52, .75], 27: [.48, .90], 28: [.52, .90], 29: [.45, .92], 30: [.50, .92], 31: [.49, .94], 32: [.55, .94] };
     Object.entries(sidePoints).forEach(([index, [x, y]]) => { landmarks[Number(index)].x = x; landmarks[Number(index)].y = y; });
-    [7, 11, 13, 15, 23, 25, 27, 29, 31].forEach(index => { landmarks[index].visibility = .35; });
+    // The far side is partly hidden in a side view. Keep it above the capture check's
+    // 0.55 threshold (assess() requires both shoulders and hips) but below the near side.
+    [7, 11, 13, 15, 23, 25, 27, 29, 31].forEach(index => { landmarks[index].visibility = .6; });
     if (state === 'forwardHeadSide') { landmarks[0].x = .64; landmarks[8].x = .61; }
   }
   return landmarks;
