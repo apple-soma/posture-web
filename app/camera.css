@@ -71,6 +71,13 @@
   font-size: 12px;
 }
 
+.uploadNote { margin: -6px 0 14px; color: #66736e; font-size: 13px; line-height: 1.6; }
+.uploadRow { display: grid; gap: 6px; margin-bottom: 10px; }
+.uploadButton { display: block; text-align: center; font-size: 13px; }
+.uploadButton input { display: none; }
+.uploadButton.busy { opacity: .6; cursor: progress; }
+.uploadMessage { font-size: 12px; color: #6a4300; line-height: 1.5; }
+
 .measurementLog { border: 1px dashed #1c6b50; }
 .measurementLog h3 { margin: 18px 0 8px; font-size: 15px; }
 .logNote { margin: 6px 0; color: #496057; font-size: 12px; }

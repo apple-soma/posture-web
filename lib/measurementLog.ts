@@ -27,7 +27,7 @@ export type MeasurementRecord = {
   label: string;
   recordedAt: string;
   calcVersion: string;
-  source: 'camera' | 'test';
+  source: 'camera' | 'upload' | 'mixed' | 'test';
   metrics: Record<MetricKey, number | null>;
   shots: Record<ShotKey, LoggedShot>;
 };

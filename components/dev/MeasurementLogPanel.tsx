@@ -96,7 +96,7 @@ export default function MeasurementLogPanel({ pending }: { pending: PendingMeasu
     <h3>記録一覧（{records.length}件）</h3>
     {records.length > 0 && <div className="logTableWrap"><table className="logTable">
       <thead><tr><th>対象者</th><th>メモ</th><th>日時</th>{LOGGED_METRICS.map(metric => <th key={metric.key}>{metric.label}</th>)}<th /></tr></thead>
-      <tbody>{records.map(record => <tr key={record.id}><td>{record.subjectId}</td><td>{record.label}{record.source === 'test' && '（テスト）'}</td><td>{new Date(record.recordedAt).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</td>{LOGGED_METRICS.map(metric => <td key={metric.key}>{format(record.metrics[metric.key])}</td>)}<td><button className="ghost" onClick={() => removeRecord(record.id)}>削除</button></td></tr>)}</tbody>
+      <tbody>{records.map(record => <tr key={record.id}><td>{record.subjectId}</td><td>{record.label}{({ test: '（テスト）', upload: '（写真）', mixed: '（撮影＋写真）', camera: '' } as const)[record.source]}</td><td>{new Date(record.recordedAt).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</td>{LOGGED_METRICS.map(metric => <td key={metric.key}>{format(record.metrics[metric.key])}</td>)}<td><button className="ghost" onClick={() => removeRecord(record.id)}>削除</button></td></tr>)}</tbody>
     </table></div>}
 
     <div className="testButtons">

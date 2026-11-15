@@ -10,10 +10,18 @@ import { createMeasurementOverlay, type CaptureSegment, type PostureMeasurement 
 import PlanBuilder from './phase4/PlanBuilder';
 import MeasurementLogPanel, { type PendingMeasurement } from './dev/MeasurementLogPanel';
 import { compactShot } from '../lib/measurementLog';
+import { checkUploadedPose, loadPhoto } from '../lib/photoUpload';
 
 type View = 'front' | 'side';
 type CameraFacing = 'user' | 'environment';
-type Shot = { dataUrl: string; landmarks: any[] | null; imageWidth?: number; imageHeight?: number; manualC7?: { x: number; y: number } };
+type Shot = { dataUrl: string; landmarks: any[] | null; imageWidth?: number; imageHeight?: number; manualC7?: { x: number; y: number }; origin?: 'camera' | 'upload' };
+type ShotKey = 'frontUpper' | 'frontLower' | 'sideUpper' | 'sideLower';
+const SHOT_PARTS: Record<ShotKey, { view: View; segment: 'upper' | 'lower'; pair: ShotKey; label: string }> = {
+  frontUpper: { view: 'front', segment: 'upper', pair: 'frontLower', label: '正面・上半身' },
+  frontLower: { view: 'front', segment: 'lower', pair: 'frontUpper', label: '正面・下半身' },
+  sideUpper: { view: 'side', segment: 'upper', pair: 'sideLower', label: '側面・上半身' },
+  sideLower: { view: 'side', segment: 'lower', pair: 'sideUpper', label: '側面・下半身' },
+};
 type Candidate = Shot & { score: number };
 type SpeechRecognitionInstance = {
   lang: string;
@@ -154,6 +162,7 @@ export default function PostureApp() {
   const [sideLower, setSideLower] = useState<Shot>(emptyShot);
   const [evaluationResults, setEvaluationResults] = useState<EvaluationResult[]>([]);
   const [pendingMeasurement, setPendingMeasurement] = useState<PendingMeasurement | null>(null);
+  const [uploadStatus, setUploadStatus] = useState<Partial<Record<ShotKey, { busy: boolean; message: string }>>>({});
   // The repeatability log is a development tool: shown in `npm run dev`, or on a
   // deployed build when opened with `?measurelog` (spec chapter 10-1).
   const [measurementLogEnabled, setMeasurementLogEnabled] = useState(false);
@@ -381,15 +390,42 @@ export default function PostureApp() {
     stopCamera(); setCameraFacing(next);
     await startCamera(next);
   }
+  async function uploadShot(key: ShotKey, file: File) {
+    const detector = landmarkerRef.current;
+    if (!detector) { setUploadStatus(status => ({ ...status, [key]: { busy: false, message: '姿勢モデルを読み込み中です。少し待ってからもう一度選んでください。' } })); return; }
+    setUploadStatus(status => ({ ...status, [key]: { busy: true, message: '写真を解析しています…' } }));
+    try {
+      const photo = await loadPhoto(file);
+      const landmarks = detector.detect(photo.canvas).landmarks?.[0] ?? null;
+      const part = SHOT_PARTS[key];
+      const problem = checkUploadedPose(landmarks, part.view, part.segment);
+      if (problem) { setUploadStatus(status => ({ ...status, [key]: { busy: false, message: problem } })); return; }
+      const shot: Shot = { dataUrl: photo.dataUrl, landmarks, imageWidth: photo.width, imageHeight: photo.height, origin: 'upload' };
+      const setters: Record<ShotKey, (shot: Shot) => void> = { frontUpper: setFrontUpper, frontLower: setFrontLower, sideUpper: setSideUpper, sideLower: setSideLower };
+      const current: Record<ShotKey, Shot> = { frontUpper, frontLower, sideUpper, sideLower };
+      setters[key](shot);
+      // A full-body photo also covers the other half of the same view when that half is still empty.
+      const pair = SHOT_PARTS[part.pair];
+      const fillsPair = !current[part.pair].landmarks && !checkUploadedPose(landmarks, pair.view, pair.segment);
+      if (fillsPair) setters[part.pair](shot);
+      setUploadStatus(status => ({ ...status, [key]: { busy: false, message: fillsPair ? `全身が写っているため、${pair.label}にも同じ写真を使いました。` : '' }, ...(fillsPair ? { [part.pair]: { busy: false, message: `${part.label}と同じ写真を使っています。` } } : {}) }));
+      setPendingMeasurement(null);
+      if (evaluationResults.length) { setEvaluationResults([]); setGuide('写真を変更しました。もう一度「姿勢を評価する」を押してください。'); }
+    } catch (error) {
+      console.error(error);
+      setUploadStatus(status => ({ ...status, [key]: { busy: false, message: '写真を読み込めませんでした。JPEG または PNG の写真を選んでください。' } }));
+    }
+  }
   function snapshot(landmarks: any[]): Shot | null {
     const video = videoRef.current, canvas = canvasRef.current;
     if (!video || !canvas || !video.videoWidth) return null;
     canvas.width = video.videoWidth; canvas.height = video.videoHeight;
     canvas.getContext('2d')?.drawImage(video, 0, 0, canvas.width, canvas.height);
-    return { dataUrl: canvas.toDataURL('image/jpeg', .9), landmarks, imageWidth: canvas.width, imageHeight: canvas.height };
+    return { dataUrl: canvas.toDataURL('image/jpeg', .9), landmarks, imageWidth: canvas.width, imageHeight: canvas.height, origin: 'camera' };
   }
   function saveShot(shot: Shot) {
     setPendingMeasurement(null);
+    setUploadStatus({});
     if (view === 'front' && segment === 'upper') {
       setFrontUpper(shot); setSegment('lower'); setGuide('正面の上半身を保存しました。続けて、骨盤から足先までを撮影してください。');
     } else if (view === 'front' && segment === 'lower') {
@@ -512,7 +548,7 @@ export default function PostureApp() {
     };
     setEvaluationResults(evaluateMeasurements(measurement, 1));
     setPendingMeasurement({
-      source: frontUpper.dataUrl.startsWith('data:image/svg') ? 'test' : 'camera',
+      source: frontUpper.dataUrl.startsWith('data:image/svg') ? 'test' : (() => { const origins = new Set([frontUpper, frontLower, sideUpper, sideLower].map(shot => shot.origin ?? 'camera')); return origins.size > 1 ? 'mixed' : origins.has('upload') ? 'upload' : 'camera'; })(),
       metrics: { cva: measurement.cva, shoulderTilt: measurement.shoulderTilt ?? null, pelvisTilt: measurement.pelvisTilt ?? null, trunkLateralTilt: measurement.trunkLateralTilt ?? null, neckTilt: measurement.neckTilt ?? null, trunkLean: measurement.trunkLean ?? null },
       shots: { frontUpper: compactShot(frontUpper), frontLower: compactShot(frontLower), sideUpper: compactShot(sideUpper), sideLower: compactShot(sideLower) },
     });
@@ -528,14 +564,14 @@ export default function PostureApp() {
       <div className={`cameraBox ${cameraOn ? 'captureActive' : ''}`}><video ref={videoRef} playsInline muted className={cameraOn ? '' : 'hidden'} style={{ transform: cameraFacing === 'user' ? 'scaleX(-1)' : undefined }} />{!cameraOn && <div className="cameraPlaceholder"><div className="silhouette">♙</div><p>{captureLabel(view, segment)}撮影ガイド</p><div className="guideLine" /></div>}{cameraOn && <><button className="captureClose" aria-label="撮影を終了" onClick={stopCamera}>×</button><span className="captureStatus">{capturing ? '撮影します' : captureReady ? '準備完了' : `${captureLabel(view, segment)}・位置調整中`}</span><div className={`frameGuide ${segment}`} />{capturing && <div className="countdownOverlay">{countdown}</div>}<div className="liveGuide"><b>{capturing ? 'そのまま動かずに立ってください' : GUIDANCE[guidanceState]}</b><span>{capturing ? '姿勢が崩れると撮影をやり直します。' : guide}</span></div></>}</div><canvas ref={canvasRef} className="hidden" />
       {!cameraOn && <div className="actions"><button className="primary" onClick={voiceGuidance ? startCameraWithVoice : startCameraWithoutVoice} disabled={loading}>撮影開始</button></div>} {!cameraOn && <p className="notice" aria-live="polite">{guide}</p>}
     </section>
-    <section className="card"><div className="sectionHead"><div><span className="step">STEP 2</span><h2>分割撮影の確認</h2></div></div><div className="shots"><ShotCard title="正面・上半身" shot={frontUpper} captureType="front" segment="upper" /><ShotCard title="正面・下半身" shot={frontLower} captureType="front" segment="lower" /><ShotCard title="側面・上半身" shot={sideUpper} captureType="side" segment="upper" onC7Change={point => { setSideUpper(shot => ({ ...shot, manualC7: point })); setPendingMeasurement(null); if (evaluationResults.length) { setEvaluationResults([]); setGuide('C7の位置を変更しました。もう一度「姿勢を評価する」を押してください。'); } }} /><ShotCard title="側面・下半身" shot={sideLower} captureType="side" segment="lower" /></div><button className="primary wide" onClick={evaluate}>姿勢を評価する</button></section>
+    <section className="card"><div className="sectionHead"><div><span className="step">STEP 2</span><h2>撮影・写真の確認</h2></div></div><p className="uploadNote">一人で撮影しにくい場合は、ほかの人に撮ってもらった写真を各欄の「写真を選ぶ」から使えます。全身が写った写真なら、上半身と下半身の両方に使われます。写真は端末内で解析し、サーバーへは送信しません。</p><div className="shots"><ShotCard title="正面・上半身" shot={frontUpper} captureType="front" segment="upper" upload={uploadStatus.frontUpper} onUpload={file => uploadShot('frontUpper', file)} /><ShotCard title="正面・下半身" shot={frontLower} captureType="front" segment="lower" upload={uploadStatus.frontLower} onUpload={file => uploadShot('frontLower', file)} /><ShotCard title="側面・上半身" shot={sideUpper} captureType="side" segment="upper" upload={uploadStatus.sideUpper} onUpload={file => uploadShot('sideUpper', file)} onC7Change={point => { setSideUpper(shot => ({ ...shot, manualC7: point })); setPendingMeasurement(null); if (evaluationResults.length) { setEvaluationResults([]); setGuide('C7の位置を変更しました。もう一度「姿勢を評価する」を押してください。'); } }} /><ShotCard title="側面・下半身" shot={sideLower} captureType="side" segment="lower" upload={uploadStatus.sideLower} onUpload={file => uploadShot('sideLower', file)} /></div><button className="primary wide" onClick={evaluate}>姿勢を評価する</button></section>
     <section className="card"><div className="sectionHead"><div><span className="step">STEP 3</span><h2>測定値と研究上の参考情報</h2></div></div>{!evaluationResults.length ? <div className="emptyResult">正面・側面それぞれの上半身・下半身を撮影後、「姿勢を評価する」を押すと項目別の参考情報を表示します。</div> : <div className="resultTable">{evaluationResults.map(result => <div className="resultRow" key={result.measurementId}><div><b>{{ cva: 'CVA', shoulderTilt: '肩の傾き', pelvisTilt: '骨盤の傾き', trunkLateralTilt: '体幹の左右の傾き', neckTilt: '首の傾き', trunkLean: '体幹の前傾', earOffset: '耳の前後位置', shoulderOffset: '肩の前後位置', hipOffset: '股関節の前後位置', kneeOffset: '膝の前後位置', ankleOffset: '足首の前後位置' }[result.measurementId] ?? result.measurementId}</b></div>{result.value != null && <strong>{`${result.value >= 0 && result.measurementId !== 'cva' ? '+' : ''}${result.value.toFixed(result.unit === 'normalized' ? 3 : 1)}${result.unit === 'degree' ? '°' : '（正規化座標）'}`}</strong>}<p>{result.explanation}</p>{result.reference && <details><summary>出典を見る</summary><p>{result.reference.sourceTitle}</p><p>{result.reference.sourceAuthors}（{result.reference.sourceYear}）</p><p>対象: {result.reference.population}</p><p>方法: {result.reference.measurementMethod}</p><a href={result.reference.sourceUrl} target="_blank" rel="noreferrer">PubMedで確認</a></details>}</div>)}</div>}<div className="evidence"><b>ご利用にあたって</b><p>本サービスの姿勢測定・評価は研究情報に基づく参考情報であり、医療上の診断を行うものではありません。</p></div></section>
     {measurementLogEnabled && <MeasurementLogPanel pending={pendingMeasurement} />}
     {evaluationResults.length > 0 && <PlanBuilder results={evaluationResults} onRemeasure={() => { setView('front'); setSegment('upper'); setGuide('再測定する場合は、正面の上半身からカメラを起動してください。'); window.scrollTo({ top: 0, behavior: 'smooth' }); }} />}
     <footer>このサービスは姿勢の改善目安を示すもので、医療診断を行うものではありません。強い痛みやしびれがある場合は医療機関にご相談ください。</footer>
   </main>;
 }
-function ShotCard({ title, shot, captureType, segment, onC7Change }: { title: string; shot: Shot; captureType: View; segment: CaptureSegment; onC7Change?: (point: { x: number; y: number } | undefined) => void }) {
+function ShotCard({ title, shot, captureType, segment, onC7Change, onUpload, upload }: { title: string; shot: Shot; captureType: View; segment: CaptureSegment; onC7Change?: (point: { x: number; y: number } | undefined) => void; onUpload?: (file: File) => void; upload?: { busy: boolean; message: string } }) {
   const [showSkeleton, setShowSkeleton] = useState(true);
   const [showReferences, setShowReferences] = useState(true);
   const [showMeasurements, setShowMeasurements] = useState(true);
@@ -543,5 +579,5 @@ function ShotCard({ title, shot, captureType, segment, onC7Change }: { title: st
   const overlay = createMeasurementOverlay(pose, captureType, shot.manualC7, segment);
   const signedAngle = (value?: number) => value == null ? '—' : `${value >= 0 ? '+' : ''}${value.toFixed(1)}°`;
   const normalized = (value?: number) => value == null ? '—' : `${value >= 0 ? '+' : ''}${value.toFixed(3)}`;
-  return <div className="shotCard"><div className="shotTitle"><b>{title}</b><span>{shot.landmarks ? '最適フレーム選定済み' : '未撮影'}</span></div>{shot.dataUrl ? <><PoseOverlay imageUrl={shot.dataUrl} pose={pose} captureType={captureType} segment={segment} manualC7={shot.manualC7} onPickPoint={onC7Change && shot.landmarks ? point => onC7Change(point) : undefined} layers={{ skeleton: showSkeleton, references: showReferences, measurements: showMeasurements }} />{onC7Change && shot.landmarks && <div className="c7Hint"><span>{shot.manualC7 ? `C7を指定済み（CVA ${overlay?.measurement.cva?.toFixed(1) ?? '—'}°）。写真をタップすると位置を修正できます。` : 'CVAを測るには、首の付け根で一番出っ張った骨（第7頸椎・C7）の位置を写真上でタップしてください。'}</span>{shot.manualC7 && <button className="ghost" onClick={() => onC7Change(undefined)}>C7を解除</button>}</div>}<div className="overlayToggles"><button className="skeletonToggle" onClick={() => setShowSkeleton(value => !value)}>{`骨格 ${showSkeleton ? 'ON' : 'OFF'}`}</button><button className="skeletonToggle" onClick={() => setShowReferences(value => !value)}>{`基準線 ${showReferences ? 'ON' : 'OFF'}`}</button><button className="skeletonToggle" onClick={() => setShowMeasurements(value => !value)}>{`測定値 ${showMeasurements ? 'ON' : 'OFF'}`}</button></div>{showMeasurements && overlay && <div className="measurementPanel"><b>{title}の測定値</b>{captureType === 'front' ? <><span>肩ライン: {signedAngle(overlay.measurement.shoulderTilt)}</span><span>骨盤ライン: {signedAngle(overlay.measurement.pelvisTilt)}</span>{segment !== 'lower' && <span>体幹の左右の傾き: {signedAngle(overlay.measurement.trunkLateralTilt)}</span>}</> : <>{segment !== 'lower' && <><span>CVA: {overlay.measurement.cva == null ? 'C7未指定' : `${overlay.measurement.cva.toFixed(1)}°`}</span><span>首の傾き: {signedAngle(overlay.measurement.neckTilt)} / 体幹の前傾: {signedAngle(overlay.measurement.trunkLean)}</span></>}<span>耳: {normalized(overlay.measurement.earOffset)} / 肩: {normalized(overlay.measurement.shoulderOffset)}</span><span>腰: {normalized(overlay.measurement.hipOffset)} / 膝: {normalized(overlay.measurement.kneeOffset)} / 足首: {normalized(overlay.measurement.ankleOffset)}</span></>}</div>}</> : <div className="emptyShot">{title}写真</div>}<small>撮影画像と同じ座標系で、骨格・基準線・測定値を重ねて表示します。</small></div>;
+  return <div className="shotCard"><div className="shotTitle"><b>{title}</b><span>{!shot.landmarks ? '未撮影' : shot.origin === 'upload' ? 'アップロード写真' : '最適フレーム選定済み'}</span></div>{onUpload && <div className="uploadRow"><label className={`ghost uploadButton${upload?.busy ? ' busy' : ''}`}>{upload?.busy ? '解析中…' : shot.landmarks ? '写真を選び直す' : '写真を選ぶ'}<input type="file" accept="image/*" disabled={upload?.busy} onChange={event => { const file = event.target.files?.[0]; event.target.value = ''; if (file) onUpload(file); }} /></label>{upload?.message && <span className="uploadMessage" aria-live="polite">{upload.message}</span>}</div>}{shot.dataUrl ? <><PoseOverlay imageUrl={shot.dataUrl} pose={pose} captureType={captureType} segment={segment} manualC7={shot.manualC7} onPickPoint={onC7Change && shot.landmarks ? point => onC7Change(point) : undefined} layers={{ skeleton: showSkeleton, references: showReferences, measurements: showMeasurements }} />{onC7Change && shot.landmarks && <div className="c7Hint"><span>{shot.manualC7 ? `C7を指定済み（CVA ${overlay?.measurement.cva?.toFixed(1) ?? '—'}°）。写真をタップすると位置を修正できます。` : 'CVAを測るには、首の付け根で一番出っ張った骨（第7頸椎・C7）の位置を写真上でタップしてください。'}</span>{shot.manualC7 && <button className="ghost" onClick={() => onC7Change(undefined)}>C7を解除</button>}</div>}<div className="overlayToggles"><button className="skeletonToggle" onClick={() => setShowSkeleton(value => !value)}>{`骨格 ${showSkeleton ? 'ON' : 'OFF'}`}</button><button className="skeletonToggle" onClick={() => setShowReferences(value => !value)}>{`基準線 ${showReferences ? 'ON' : 'OFF'}`}</button><button className="skeletonToggle" onClick={() => setShowMeasurements(value => !value)}>{`測定値 ${showMeasurements ? 'ON' : 'OFF'}`}</button></div>{showMeasurements && overlay && <div className="measurementPanel"><b>{title}の測定値</b>{captureType === 'front' ? <><span>肩ライン: {signedAngle(overlay.measurement.shoulderTilt)}</span><span>骨盤ライン: {signedAngle(overlay.measurement.pelvisTilt)}</span>{segment !== 'lower' && <span>体幹の左右の傾き: {signedAngle(overlay.measurement.trunkLateralTilt)}</span>}</> : <>{segment !== 'lower' && <><span>CVA: {overlay.measurement.cva == null ? 'C7未指定' : `${overlay.measurement.cva.toFixed(1)}°`}</span><span>首の傾き: {signedAngle(overlay.measurement.neckTilt)} / 体幹の前傾: {signedAngle(overlay.measurement.trunkLean)}</span></>}<span>耳: {normalized(overlay.measurement.earOffset)} / 肩: {normalized(overlay.measurement.shoulderOffset)}</span><span>腰: {normalized(overlay.measurement.hipOffset)} / 膝: {normalized(overlay.measurement.kneeOffset)} / 足首: {normalized(overlay.measurement.ankleOffset)}</span></>}</div>}</> : <div className="emptyShot">{title}写真</div>}<small>撮影画像と同じ座標系で、骨格・基準線・測定値を重ねて表示します。</small></div>;
 }
